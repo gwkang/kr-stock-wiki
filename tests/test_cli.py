@@ -3,8 +3,144 @@ from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from kr_stock_wiki.cli import main
+from kr_stock_wiki.cli import (
+    _load_krx_snapshot,
+    _load_listing_risks,
+    _operational_evidence,
+    main,
+)
+from kr_stock_wiki.collectors.krx import KrxDailySnapshot, KrxMarket
 from kr_stock_wiki.evidence import EvidenceRecord, EvidenceSource, VerificationStatus
+
+
+def write_operational_snapshots(
+    tmp_path: Path,
+    *,
+    business_date: date,
+    analysis_date: date,
+    administrative_issue: int = 0,
+) -> tuple[Path, Path]:
+    fetched_at = datetime(2026, 7, 20, 20, 30, tzinfo=ZoneInfo("Asia/Seoul"))
+
+    def price(ticker: str, market: KrxMarket) -> EvidenceRecord:
+        evidence_id = (
+            f"krx:daily:{market.value}:{business_date.strftime('%Y%m%d')}:{ticker}"
+        )
+        return EvidenceRecord(
+            source=EvidenceSource.KRX,
+            evidence_id=evidence_id,
+            canonical_event_id=evidence_id,
+            kind="daily-price",
+            company_name=ticker,
+            title="KRX 일별 시세",
+            source_url=(
+                "https://data-dbg.krx.co.kr/svc/apis/sto/"
+                + ("stk_bydd_trd" if market is KrxMarket.KOSPI else "ksq_bydd_trd")
+            ),
+            published_date=business_date,
+            fetched_at=fetched_at,
+            verification=VerificationStatus.OFFICIAL,
+            ticker=ticker,
+            metrics={
+                "close": 71_000,
+                "volume": 1_000_000,
+                "trading_value": 100_000_000_000,
+                "market_cap": 500_000_000_000,
+            },
+            raw={"MKT_NM": market.value},
+        )
+
+    prices = (
+        price("005930", KrxMarket.KOSPI),
+        *(price(f"{600000 + index:06d}", KrxMarket.KOSPI) for index in range(499)),
+        price("247540", KrxMarket.KOSDAQ),
+        *(price(f"{700000 + index:06d}", KrxMarket.KOSDAQ) for index in range(999)),
+    )
+    krx = KrxDailySnapshot(
+        business_date=business_date,
+        requested_markets=(KrxMarket.KOSPI, KrxMarket.KOSDAQ),
+        completed_markets=(KrxMarket.KOSPI, KrxMarket.KOSDAQ),
+        record_counts=((KrxMarket.KOSPI, 500), (KrxMarket.KOSDAQ, 1_000)),
+        records=prices,
+        fetched_at=fetched_at,
+    )
+    krx_path = tmp_path / "krx-snapshot.json"
+    krx_path.write_text(json.dumps(krx.to_payload()), encoding="utf-8")
+
+    status_id = f"kind:listing-risk:{analysis_date.isoformat()}:005930"
+    status = EvidenceRecord(
+        source=EvidenceSource.KIND,
+        evidence_id=status_id,
+        canonical_event_id=status_id,
+        kind="listing-risk-status",
+        company_name="삼성전자",
+        title="KRX KIND 투자유의 상태",
+        source_url="https://kind.krx.co.kr/investwarn/adminissue.do",
+        published_date=analysis_date,
+        fetched_at=fetched_at,
+        verification=VerificationStatus.OFFICIAL,
+        ticker="005930",
+        metrics={
+            "administrative_issue": administrative_issue,
+            "trading_halt": 0,
+            "investment_warning": 0,
+        },
+    )
+    kind_path = tmp_path / "kind-status.json"
+    kind_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source": "kind",
+                "coverage_complete": True,
+                "collected_at": fetched_at.isoformat(),
+                "date": analysis_date.isoformat(),
+                "requested_tickers": ["005930"],
+                "completed_tickers": ["005930"],
+                "records": [status.to_dict()],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return krx_path, kind_path
+
+
+def test_operational_snapshots_reject_lookahead_timestamps(tmp_path: Path):
+    import pytest
+
+    business_date = date(2026, 7, 20)
+    observed = datetime(2026, 7, 20, 20, 30, tzinfo=ZoneInfo("Asia/Seoul"))
+    krx_path, kind_path = write_operational_snapshots(
+        tmp_path,
+        business_date=business_date,
+        analysis_date=business_date,
+    )
+
+    kind_payload = json.loads(kind_path.read_text(encoding="utf-8"))
+    future = datetime(2026, 7, 20, 20, 30, 1, tzinfo=ZoneInfo("Asia/Seoul"))
+    kind_payload["collected_at"] = future.isoformat()
+    kind_payload["records"][0]["fetched_at"] = future.isoformat()
+    kind_path.write_text(json.dumps(kind_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="within one hour before analysis"):
+        _load_listing_risks(
+            kind_path,
+            analysis_time=observed,
+            candidate_tickers={"005930"},
+        )
+
+    krx_payload = json.loads(krx_path.read_text(encoding="utf-8"))
+    krx_payload["collected_at"] = future.isoformat()
+    for record in krx_payload["records"]:
+        record["fetched_at"] = future.isoformat()
+    krx_path.write_text(json.dumps(krx_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="within 12 hours before analysis"):
+        _operational_evidence(
+            [],
+            observed=observed,
+            business_date=business_date,
+            krx_snapshot=_load_krx_snapshot(krx_path),
+            listing_risks={},
+        )
 
 
 def test_cli_run_generates_wiki_from_json(tmp_path: Path):
@@ -13,6 +149,7 @@ def test_cli_run_generates_wiki_from_json(tmp_path: Path):
         json.dumps(
             {
                 "as_of": "2026-07-20T20:30:00+09:00",
+                "business_date": "2026-07-20",
                 "mode": "post-market",
                 "candidates": [
                     {
@@ -39,8 +176,25 @@ def test_cli_run_generates_wiki_from_json(tmp_path: Path):
         encoding="utf-8",
     )
     output = tmp_path / "wiki"
+    krx_snapshot, kind_status = write_operational_snapshots(
+        tmp_path,
+        business_date=date(2026, 7, 20),
+        analysis_date=date(2026, 7, 20),
+    )
 
-    code = main(["run", "--input", str(source), "--output", str(output)])
+    code = main(
+        [
+            "run",
+            "--input",
+            str(source),
+            "--krx-snapshot",
+            str(krx_snapshot),
+            "--kind-status",
+            str(kind_status),
+            "--output",
+            str(output),
+        ]
+    )
 
     assert code == 0
     assert (output / "Candidates.md").exists()
@@ -161,6 +315,45 @@ def test_collect_nxt_writes_delayed_quotes_and_session_summary(
     }
 
 
+def test_collect_kind_writes_complete_official_status_snapshot(
+    tmp_path: Path, monkeypatch
+):
+    _krx_path, fixture_path = write_operational_snapshots(
+        tmp_path,
+        business_date=date(2026, 7, 18),
+        analysis_date=date(2026, 7, 18),
+    )
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    record = EvidenceRecord.from_dict(fixture["records"][0])
+    monkeypatch.setattr(
+        "kr_stock_wiki.cli.KindClient.statuses",
+        lambda _client, tickers, as_of: (
+            [record] if tickers == ["005930"] and as_of == date(2026, 7, 18) else []
+        ),
+    )
+    output = tmp_path / "kind-output.json"
+
+    code = main(
+        [
+            "collect-kind",
+            "--date",
+            "2026-07-18",
+            "--ticker",
+            "005930",
+            "--output",
+            str(output),
+        ]
+    )
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert code == 0
+    assert payload["source"] == "kind"
+    assert payload["coverage_complete"] is True
+    assert payload["requested_tickers"] == ["005930"]
+    assert payload["completed_tickers"] == ["005930"]
+    assert payload["records"] == [record.to_dict()]
+
+
 def test_collect_krx_writes_versioned_snapshot(tmp_path: Path, monkeypatch):
     record = EvidenceRecord(
         source=EvidenceSource.KRX,
@@ -177,13 +370,23 @@ def test_collect_krx_writes_versioned_snapshot(tmp_path: Path, monkeypatch):
         verification=VerificationStatus.OFFICIAL,
         ticker="005930",
         metrics={"close": 71000, "volume": 12345678},
+        raw={"MKT_NM": "KOSPI"},
+    )
+    fetched_at = datetime(2026, 7, 18, 9, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+    snapshot = KrxDailySnapshot(
+        business_date=date(2026, 7, 17),
+        requested_markets=(KrxMarket.KOSPI, KrxMarket.KOSDAQ),
+        completed_markets=(KrxMarket.KOSPI, KrxMarket.KOSDAQ),
+        record_counts=((KrxMarket.KOSPI, 1), (KrxMarket.KOSDAQ, 0)),
+        records=(record,),
+        fetched_at=fetched_at,
     )
 
     monkeypatch.setenv("KRX_API_KEY", "secret-krx-key")
     monkeypatch.setattr(
-        "kr_stock_wiki.cli.KrxClient.daily_prices",
+        "kr_stock_wiki.cli.KrxClient.daily_snapshot",
         lambda _client, business_date: (
-            [record] if business_date == date(2026, 7, 17) else []
+            snapshot if business_date == date(2026, 7, 17) else None
         ),
     )
     output = tmp_path / "nested" / "krx.json"
@@ -201,7 +404,10 @@ def test_collect_krx_writes_versioned_snapshot(tmp_path: Path, monkeypatch):
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert code == 0
     assert payload["schema_version"] == 1
-    assert payload["markets"] == ["KOSPI", "KOSDAQ"]
+    assert payload["coverage_complete"] is True
+    assert payload["requested_markets"] == ["KOSPI", "KOSDAQ"]
+    assert payload["completed_markets"] == ["KOSPI", "KOSDAQ"]
+    assert payload["record_counts"] == {"KOSPI": 1, "KOSDAQ": 0}
     assert payload["records"][0]["metrics"]["close"] == 71000
     assert "secret-krx-key" not in output.read_text(encoding="utf-8")
 
@@ -357,10 +563,57 @@ def test_cli_reports_malformed_json_without_traceback(tmp_path: Path, capsys):
     source = tmp_path / "bad.json"
     source.write_text("{broken", encoding="utf-8")
 
-    code = main(["run", "--input", str(source), "--output", str(tmp_path / "wiki")])
+    code = main(
+        [
+            "run",
+            "--input",
+            str(source),
+            "--krx-snapshot",
+            str(tmp_path / "missing-krx.json"),
+            "--kind-status",
+            str(tmp_path / "missing-kind.json"),
+            "--output",
+            str(tmp_path / "wiki"),
+        ]
+    )
 
     assert code == 2
     assert "입력 오류" in capsys.readouterr().err
+
+
+def test_cli_run_fails_closed_for_pre_market_without_official_day_calendar(
+    tmp_path: Path, capsys
+):
+    source = tmp_path / "pre-market.json"
+    source.write_text(
+        json.dumps(
+            {
+                "as_of": "2026-07-20T07:30:00+09:00",
+                "business_date": "2026-07-17",
+                "mode": "pre-market",
+                "candidates": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    code = main(
+        [
+            "run",
+            "--input",
+            str(source),
+            "--krx-snapshot",
+            str(tmp_path / "missing-krx.json"),
+            "--kind-status",
+            str(tmp_path / "missing-kind.json"),
+            "--output",
+            str(tmp_path / "wiki"),
+        ]
+    )
+
+    assert code == 2
+    assert "공식 KRX 당일 개장 캘린더" in capsys.readouterr().err
+    assert not (tmp_path / "wiki").exists()
 
 
 def test_cli_lint_returns_nonzero_for_invalid_wiki(tmp_path: Path):

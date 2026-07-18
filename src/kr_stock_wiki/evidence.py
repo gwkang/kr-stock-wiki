@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 class EvidenceSource(StrEnum):
     DART = "dart"
     KRX = "krx"
+    KIND = "kind"
     NXT = "nxt"
     OFFICIAL_NEWS = "official-news"
 
@@ -60,6 +61,33 @@ class EvidenceRecord:
             "metrics": dict(self.metrics),
             "raw": dict(self.raw),
         }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> EvidenceRecord:
+        if not isinstance(payload, dict):
+            raise ValueError("evidence payload must be a JSON object")
+        metrics = payload.get("metrics")
+        raw = payload.get("raw")
+        if not isinstance(metrics, dict) or not isinstance(raw, dict):
+            raise ValueError("evidence metrics and raw must be JSON objects")
+        return cls(
+            source=EvidenceSource(payload["source"]),
+            evidence_id=payload["evidence_id"],
+            canonical_event_id=payload["canonical_event_id"],
+            kind=payload["kind"],
+            company_name=payload["company_name"],
+            title=payload["title"],
+            source_url=payload["source_url"],
+            published_date=date.fromisoformat(payload["published_date"]),
+            fetched_at=datetime.fromisoformat(payload["fetched_at"]),
+            verification=VerificationStatus(payload["verification"]),
+            ticker=payload.get("ticker"),
+            delay_minutes=payload.get("delay_minutes"),
+            is_correction=payload.get("is_correction", False),
+            is_withdrawn=payload.get("is_withdrawn", False),
+            metrics=dict(metrics),
+            raw=dict(raw),
+        )
 
     def __post_init__(self) -> None:
         if self.fetched_at.tzinfo is None or self.fetched_at.utcoffset() is None:

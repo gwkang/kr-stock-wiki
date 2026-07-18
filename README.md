@@ -16,7 +16,7 @@
 - 공식 OpenDART 공시검색·KRX 일별 시세·NXT 20분 지연 시세 및 세션 집계·연합뉴스 RSS 수집기와 공통 근거 데이터 계약
 - CLI, pytest, GitHub Actions CI
 
-OpenDART·KRX·NXT·연합뉴스 RSS 수집기가 구현됐습니다. OpenDART와 KRX는 각 API 키를 연결하면 공식 공시 및 KOSPI·KOSDAQ 일별 시세 스냅샷을 생성하며, NXT와 연합뉴스 RSS는 별도 인증 없이 각각 공식 웹사이트의 시세·세션 집계와 경제·산업·마켓 기사를 수집합니다. 투자자별 수급 수집기는 아직 연결되지 않았습니다. 샘플 데이터는 실행 검증용으로만 사용합니다.
+OpenDART·KRX·NXT·연합뉴스 RSS·KRX KIND 투자유의 상태 수집기가 구현됐습니다. OpenDART와 KRX는 각 API 키를 연결하면 공식 공시 및 KOSPI·KOSDAQ 일별 시세 스냅샷을 생성하며, NXT·연합뉴스 RSS·KIND는 별도 인증 없이 공식 웹사이트에서 각각 시세·세션 집계, 경제·산업·마켓 기사, 관리종목·거래정지·투자경고/위험 상태를 수집합니다. 투자자별 수급 수집기는 아직 연결되지 않았습니다. 샘플 신호는 입력 구조와 테스트 검증용으로만 사용하며 실제 최신 후보로 게시하지 않습니다.
 
 ## 설치와 테스트
 
@@ -25,15 +25,21 @@ uv sync
 uv run pytest
 ```
 
-## 모의 리포트 생성
+## 리포트 생성
+
+`run`은 구조 예제만으로 실행되지 않습니다. 후보 신호의 `business_date`와 일치하는 완전한 KRX 양시장 스냅샷, 분석일과 일치하는 후보별 KIND 상태 스냅샷이 모두 필요합니다.
 
 ```bash
 uv run kr-stock-wiki run \
-  --input examples/post-market-signals.json \
+  --input build/signals/post-market.json \
+  --krx-snapshot build/evidence/krx-${BUSINESS_DATE}.json \
+  --kind-status build/evidence/kind-${ANALYSIS_DATE}.json \
   --output build/wiki
 
 uv run kr-stock-wiki lint --wiki build/wiki
 ```
+
+`examples/post-market-signals.json`은 입력 구조 검증용 예제입니다. KIND의 관리종목·거래정지는 현재 상태만 공식적으로 재현할 수 있으므로, 과거 예제에 현재 KIND 상태를 붙여 최신 운영 리포트로 재생할 수 없습니다.
 
 ## OpenDART 공시 수집
 
@@ -70,7 +76,21 @@ uv run kr-stock-wiki collect-krx \
   --output build/evidence/krx-2026-07-17.json
 ```
 
-KOSPI·KOSDAQ의 종가, 등락률, 시가·고가·저가, 거래량·거래대금, 시가총액, 상장주식 수를 공식 KRX 응답에서 정규화합니다. 인증키는 결과의 출처 URL, 오류 메시지, 예외 traceback 및 스냅샷에 기록하지 않습니다.
+KOSPI·KOSDAQ의 종가, 등락률, 시가·고가·저가, 거래량·거래대금, 시가총액, 상장주식 수를 공식 KRX 응답에서 정규화합니다. 인증키는 결과의 출처 URL, 오류 메시지, 예외 traceback 및 스냅샷에 기록하지 않습니다. 성공 스냅샷은 요청 시장·완료 시장·시장별 실제 레코드 수를 함께 저장합니다. 메타데이터·레코드 일관성 및 ticker 유일성뿐 아니라 운영 기본값으로 KOSPI 500건·KOSDAQ 1,000건의 보수적 cardinality 하한을 요구합니다. 0건은 휴장으로 추정하지 않고 `unknown`, 1건 이상이지만 하한 미만이면 부분 응답으로 거부합니다. KRX 응답에 독립 total-count가 없어 이 하한은 절대적 전체성 증명이 아닌 gross truncation 방어선이며, 향후 공식 상장 유니버스 대조로 강화해야 합니다.
+
+## KRX KIND 투자유의 상태 수집
+
+분석일 당일의 각 후보를 대상으로 KIND 공식 관리종목·매매거래정지 현재 목록과 최근 3년 투자경고·투자위험 지정/해제 이력을 조회합니다. 별도 인증키가 필요하지 않습니다.
+
+```bash
+uv run kr-stock-wiki collect-kind \
+  --date 2026-07-18 \
+  --ticker 005930 \
+  --ticker 312610 \
+  --output build/evidence/kind-2026-07-18.json
+```
+
+현재 목록으로 제공되는 관리종목·거래정지의 과거 상태를 추정하지 않기 위해 `--date`는 실행 시점의 KST 날짜만 허용합니다. 후보마다 KIND 공식 회사검색 JSON에서 A-prefixed 종목코드·6자리 단축코드·상장 상태·회사명을 먼저 교차 검증하고, 상태 AJAX endpoint가 실제 인식하는 검증된 6자리 단축코드와 회사명을 함께 사용한 네 상태 조회가 모두 성공해야 레코드를 만듭니다. 양성 행의 회사명도 공식 회사검색 결과와 대조하며, 식별 불가능하거나 다른 회사인 행은 fail-closed 합니다. 성공 스냅샷에는 요청·완료 ticker와 `coverage_complete: true`를 기록합니다. 각 상태는 출처·ticker·기준일·수집시각·공식 검증 상태를 가진 `listing-risk-status` 근거로 저장됩니다. 하나라도 누락되거나 비공식/날짜 불일치이면 운영 필터가 후보를 통과시키지 않습니다.
 
 ## NXT 시세 및 세션별 거래 현황 수집
 
@@ -96,6 +116,12 @@ uv run kr-stock-wiki collect-news \
 ```
 
 같은 기사가 여러 피드에 나타나면 GUID로 병합하고 카테고리를 보존합니다. 모든 발행시각은 원본 문자열을 보존하면서 KST로 정규화합니다. 피드가 120건 한도에 도달하고 요청 시작일이 가장 오래된 항목 날짜 이전 또는 당일이면 과거 범위가 잘린 것으로 판단해 스냅샷을 쓰지 않고 실패합니다. 성공 출력에는 `coverage_complete: true`가 포함됩니다. `verification: official`은 RSS와 원문 링크가 연합뉴스의 1차 발행 경로임을 뜻하며, 기사 속 기업 주장이나 전망이 거래소·공시로 별도 확인됐다는 뜻은 아닙니다. RSS는 최신 기사 창만 제공하므로 장기 과거자료 API로 사용하지 않습니다.
+
+## 거래일 및 운영 필터
+
+`TradingDayGate`는 토·일요일을 휴장으로 처리하고, 평일에는 같은 기준일의 공식 KRX 검증 스냅샷이 KOSPI·KOSDAQ 양 endpoint 완료, 시장별 cardinality 하한, ticker 유일성을 모두 충족할 때만 `open`으로 판정합니다. 임의 EvidenceRecord 목록은 입력으로 받지 않습니다. 평일에 스냅샷이 없거나 endpoint 완료가 빠지거나 어느 시장의 레코드가 0건이면 휴장으로 추정하지 않고 `unknown`, 1건 이상이지만 운영 하한 미만이면 부분 응답으로 처리합니다. 07:30 프리마켓에는 이전 거래일 가격만 있어 당일 평일 공휴일을 증명할 수 없으므로, 공식 KRX 당일 개장 캘린더가 연결될 때까지 CLI 실행을 fail-closed로 거부합니다. 현재 안전하게 실행 가능한 경로는 당일 양시장 데이터가 확정된 post-market입니다.
+
+`OperationalFilter`의 기본 유동성 하한은 종가 1,000원, 거래량 100,000주, 거래대금 50억원, 시가총액 1,000억원입니다. 기준은 생성자 인자로 명시적으로 변경할 수 있습니다. 관리종목·거래정지·투자경고는 KIND 공식 `listing-risk-status` 근거의 정수 `0/1` 값으로 확인돼야 하며 근거가 없거나 출처·ticker·기준일이 불일치하면 fail-closed로 후보에서 제외되거나 입력을 거부합니다. `as_of` 이후 수집된 근거는 금지하며 KIND는 최대 1시간, KRX 일별 스냅샷은 최대 12시간 이내 freshness를 요구합니다. `ResearchHarness.run`은 임의 운영 판정 map을 받지 않고 모든 후보와 정확히 일치하는 `OperationalEvidence` map의 KRX 가격·KIND 위험 근거를 자체 검증해 판정을 재계산하므로 직접 호출에서도 `eligible=True` 주입으로 필터를 우회할 수 없습니다.
 
 ## 입력 계약
 

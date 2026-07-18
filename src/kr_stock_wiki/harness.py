@@ -2,12 +2,22 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import yaml
 
 from .agents import DEFAULT_AGENTS
+from .market_rules import (
+    OperationalDecision,
+    OperationalEvidence,
+    OperationalFilter,
+    apply_operational_decision,
+)
 from .models import Candidate, HarnessResult, StockReport
 from .scanner import BalancedRanker
+
+
+_KST = ZoneInfo("Asia/Seoul")
 
 
 def add_trading_days(
@@ -130,14 +140,60 @@ class ResearchHarness:
         observed_at: datetime,
         mode: str,
         output_dir: Path,
+        *,
+        operational_evidence: dict[str, OperationalEvidence],
     ) -> HarnessResult:
         if mode not in {"pre-market", "post-market"}:
             raise ValueError("mode must be pre-market or post-market")
         if observed_at.tzinfo is None or observed_at.utcoffset() is None:
             raise ValueError("observed_at must include a timezone")
+        if mode == "pre-market":
+            raise ValueError(
+                "pre-market 실행에는 공식 KRX 당일 개장 캘린더 근거가 필요합니다"
+            )
         tickers = [candidate.ticker for candidate in candidates]
         if len(tickers) != len(set(tickers)):
             raise ValueError("중복 종목코드는 허용되지 않습니다")
+        if set(operational_evidence) != set(tickers):
+            raise ValueError("모든 후보와 정확히 일치하는 운영 근거가 필요합니다")
+        policy = OperationalFilter()
+        decisions: dict[str, OperationalDecision] = {}
+        analysis_date = observed_at.astimezone(_KST).date()
+        for ticker, evidence in operational_evidence.items():
+            if evidence.ticker != ticker:
+                raise ValueError("운영 근거 map의 ticker가 일치하지 않습니다")
+            price = evidence.price
+            if price is not None and (
+                price.published_date != analysis_date
+                or price.fetched_at > observed_at
+                or observed_at - price.fetched_at > timedelta(hours=12)
+            ):
+                raise ValueError(
+                    "KRX 가격 근거는 분석일 당일 12시간 이내에 수집돼야 합니다"
+                )
+            risk_record = evidence.listing_risk.evidence
+            if risk_record is not None and (
+                risk_record.published_date != analysis_date
+                or risk_record.fetched_at > observed_at
+                or observed_at - risk_record.fetched_at > timedelta(hours=1)
+            ):
+                raise ValueError(
+                    "KIND 상태 근거는 분석일 당일 1시간 이내에 수집돼야 합니다"
+                )
+            if price is None:
+                decisions[ticker] = OperationalDecision(
+                    ticker, False, ("공식 KRX 일별 시세 없음",)
+                )
+            else:
+                decisions[ticker] = policy.evaluate(
+                    price,
+                    evidence.listing_risk,
+                    analysis_date=analysis_date,
+                )
+        filtered_candidates = [
+            apply_operational_decision(candidate, decisions[candidate.ticker])
+            for candidate in candidates
+        ]
         output_dir.mkdir(parents=True, exist_ok=True)
         if output_dir.is_symlink() or any(
             path.is_symlink() for path in output_dir.rglob("*")
@@ -151,7 +207,7 @@ class ResearchHarness:
             raise ValueError("stocks path escaped output directory or is a symlink")
         reports: list[StockReport] = []
         paths: list[Path] = []
-        for evaluation in self.ranker.rank(candidates, as_of=observed_at):
+        for evaluation in self.ranker.rank(filtered_candidates, as_of=observed_at):
             candidate = evaluation.candidate
             findings = {
                 agent.role: agent.analyze(candidate, evaluation)

@@ -32,6 +32,12 @@ class KrxMarket(StrEnum):
     KOSDAQ = "KOSDAQ"
 
 
+MINIMUM_DAILY_RECORDS: tuple[tuple[KrxMarket, int], ...] = (
+    (KrxMarket.KOSPI, 500),
+    (KrxMarket.KOSDAQ, 1_000),
+)
+
+
 _ENDPOINTS = {
     KrxMarket.KOSPI: "sto/stk_bydd_trd",
     KrxMarket.KOSDAQ: "sto/ksq_bydd_trd",
@@ -78,18 +84,154 @@ def _decimal(value: object) -> float | None:
     return float(text) if text not in {"", "-"} else None
 
 
+@dataclass(frozen=True)
+class KrxDailySnapshot:
+    business_date: date
+    requested_markets: tuple[KrxMarket, ...]
+    completed_markets: tuple[KrxMarket, ...]
+    record_counts: tuple[tuple[KrxMarket, int], ...]
+    records: tuple[EvidenceRecord, ...]
+    fetched_at: datetime
+
+    def __post_init__(self) -> None:
+        if not self.requested_markets or len(set(self.requested_markets)) != len(
+            self.requested_markets
+        ):
+            raise ValueError("requested KRX markets must be non-empty and unique")
+        if len(set(self.completed_markets)) != len(self.completed_markets):
+            raise ValueError("completed KRX markets must be unique")
+        if not set(self.completed_markets) <= set(self.requested_markets):
+            raise ValueError("completed KRX markets must have been requested")
+        if self.fetched_at.tzinfo is None or self.fetched_at.utcoffset() is None:
+            raise ValueError("KRX snapshot fetched_at must be timezone-aware")
+        counts = self.counts
+        if set(counts) != set(self.completed_markets):
+            raise ValueError("record counts must cover exactly the completed markets")
+        if any(isinstance(count, bool) or count < 0 for count in counts.values()):
+            raise ValueError("KRX record counts must be non-negative integers")
+        actual = {market: 0 for market in self.completed_markets}
+        tickers: set[str] = set()
+        for record in self.records:
+            if (
+                record.source is not EvidenceSource.KRX
+                or record.verification is not VerificationStatus.OFFICIAL
+                or record.kind != "daily-price"
+                or record.published_date != self.business_date
+                or record.ticker is None
+            ):
+                raise ValueError("KRX snapshot contains an invalid evidence record")
+            if record.ticker in tickers:
+                raise ValueError("KRX snapshot contains duplicate tickers")
+            tickers.add(record.ticker)
+            try:
+                market = KrxMarket(str(record.raw["MKT_NM"]))
+            except (KeyError, ValueError, TypeError):
+                raise ValueError("KRX snapshot record has an invalid market") from None
+            parsed = urlparse(record.source_url)
+            if (
+                parsed.scheme != "https"
+                or parsed.hostname != "data-dbg.krx.co.kr"
+                or parsed.path != f"/svc/apis/{_ENDPOINTS[market]}"
+            ):
+                raise ValueError("KRX snapshot record has an invalid official endpoint")
+            if market not in actual:
+                raise ValueError("KRX snapshot record belongs to an incomplete market")
+            actual[market] += 1
+        if counts != actual:
+            raise ValueError("KRX snapshot record counts do not match records")
+        if (
+            self.records
+            and max(record.fetched_at for record in self.records) != self.fetched_at
+        ):
+            raise ValueError("KRX snapshot fetched_at must match latest record")
+
+    @property
+    def counts(self) -> dict[KrxMarket, int]:
+        counts: dict[KrxMarket, int] = {}
+        for market, count in self.record_counts:
+            if market in counts:
+                raise ValueError("record counts must have unique markets")
+            if not isinstance(count, int):
+                raise ValueError("KRX record counts must be integers")
+            counts[market] = count
+        return counts
+
+    @property
+    def coverage_complete(self) -> bool:
+        return set(self.completed_markets) == set(self.requested_markets)
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "source": "krx",
+            "collected_at": self.fetched_at.isoformat(),
+            "date": self.business_date.isoformat(),
+            "coverage_complete": self.coverage_complete,
+            "requested_markets": [market.value for market in self.requested_markets],
+            "completed_markets": [market.value for market in self.completed_markets],
+            "record_counts": {
+                market.value: count for market, count in self.record_counts
+            },
+            "records": [record.to_dict() for record in self.records],
+        }
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, object]) -> KrxDailySnapshot:
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schema_version") != 1
+            or payload.get("source") != "krx"
+        ):
+            raise ValueError("invalid KRX snapshot envelope")
+        requested_raw = payload.get("requested_markets")
+        completed_raw = payload.get("completed_markets")
+        counts_raw = payload.get("record_counts")
+        records_raw = payload.get("records")
+        if (
+            not isinstance(requested_raw, list)
+            or not isinstance(completed_raw, list)
+            or not isinstance(records_raw, list)
+            or not isinstance(counts_raw, dict)
+        ):
+            raise ValueError("invalid KRX snapshot coverage metadata")
+        snapshot = cls(
+            business_date=date.fromisoformat(str(payload["date"])),
+            requested_markets=tuple(KrxMarket(str(value)) for value in requested_raw),
+            completed_markets=tuple(KrxMarket(str(value)) for value in completed_raw),
+            record_counts=tuple(
+                (KrxMarket(str(market)), count) for market, count in counts_raw.items()
+            ),
+            records=tuple(EvidenceRecord.from_dict(record) for record in records_raw),
+            fetched_at=datetime.fromisoformat(str(payload["collected_at"])),
+        )
+        if payload.get("coverage_complete") is not snapshot.coverage_complete:
+            raise ValueError("KRX snapshot coverage_complete is inconsistent")
+        return snapshot
+
+
 @dataclass
 class KrxClient:
     api_key: str = field(repr=False)
     transport: Transport = field(default=_default_transport, repr=False)
     clock: Clock = field(default=lambda: datetime.now().astimezone(), repr=False)
     timeout: float = 15.0
+    minimum_record_counts: tuple[tuple[KrxMarket, int], ...] = MINIMUM_DAILY_RECORDS
 
     def __post_init__(self) -> None:
         if not self.api_key or any(char.isspace() for char in self.api_key):
             raise ValueError("KRX API key must be non-empty and contain no whitespace")
         if self.timeout <= 0:
             raise ValueError("timeout must be positive")
+        minimums = dict(self.minimum_record_counts)
+        if (
+            len(minimums) != len(self.minimum_record_counts)
+            or set(minimums) != set(KrxMarket)
+            or any(
+                isinstance(value, bool) or not isinstance(value, int) or value <= 0
+                for value in minimums.values()
+            )
+        ):
+            raise ValueError("KRX minimum record counts must cover every market")
 
     def _request(self, endpoint: str, business_date: date) -> list[dict]:
         params = {
@@ -120,6 +262,47 @@ class KrxClient:
             raise KrxResponseError("KRX OutBlock_1 must contain JSON objects")
         return records
 
+    def daily_snapshot(
+        self,
+        business_date: date,
+        *,
+        markets: tuple[KrxMarket, ...] = (KrxMarket.KOSPI, KrxMarket.KOSDAQ),
+    ) -> KrxDailySnapshot:
+        requested = tuple(markets)
+        started_at = self.clock()
+        records = tuple(self.daily_prices(business_date, markets=requested))
+        counts = tuple(
+            (
+                market,
+                sum(
+                    1 for record in records if record.raw.get("MKT_NM") == market.value
+                ),
+            )
+            for market in requested
+        )
+        minimums = dict(self.minimum_record_counts)
+        partial = [
+            f"{market.value}={count}<{minimums[market]}"
+            for market, count in counts
+            if 0 < count < minimums[market]
+        ]
+        if partial:
+            raise KrxResponseError(
+                "KRX response failed minimum market cardinality: " + ", ".join(partial)
+            )
+        fetched_at = max(
+            (record.fetched_at for record in records),
+            default=started_at,
+        )
+        return KrxDailySnapshot(
+            business_date=business_date,
+            requested_markets=requested,
+            completed_markets=requested,
+            record_counts=counts,
+            records=records,
+            fetched_at=fetched_at,
+        )
+
     def daily_prices(
         self,
         business_date: date,
@@ -128,6 +311,10 @@ class KrxClient:
     ) -> list[EvidenceRecord]:
         if not markets:
             raise ValueError("at least one KRX market is required")
+        if len(set(markets)) != len(markets):
+            raise ValueError("KRX markets must be unique")
+        if not all(isinstance(market, KrxMarket) for market in markets):
+            raise ValueError("unsupported KRX market")
         date_text = business_date.strftime("%Y%m%d")
         evidence: list[EvidenceRecord] = []
         for market in markets:
