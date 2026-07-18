@@ -37,7 +37,7 @@ def test_sync_wiki_tree_copies_markdown_and_removes_stale_pages(tmp_path: Path):
     target = tmp_path / "target"
     (source / "stocks").mkdir(parents=True)
     target.mkdir()
-    (source / "Home.md").write_text("home", encoding="utf-8")
+    (source / "Home.md").write_text("---\ntitle: Home\n---\n# Home", encoding="utf-8")
     (source / "stocks" / "005930.md").write_text("report", encoding="utf-8")
     (source / "raw.json").write_text("{}", encoding="utf-8")
     (target / "Stale.md").write_text("stale", encoding="utf-8")
@@ -49,3 +49,4 @@ def test_sync_wiki_tree_copies_markdown_and_removes_stale_pages(tmp_path: Path):
     ) == ["Home.md", "stocks/005930.md"]
     assert "Stale.md" in changed.removed
     assert "Home.md" in changed.copied
+    assert (target / "Home.md").read_text(encoding="utf-8") == "# Home"
