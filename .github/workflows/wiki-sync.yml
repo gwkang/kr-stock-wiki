@@ -1,0 +1,38 @@
+name: Publish GitHub Wiki
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: github-wiki-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          python-version: "3.13.5"
+      - run: uv sync --locked
+      - run: uv run kr-stock-wiki lint --wiki wiki
+      - name: Clone GitHub Wiki
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" /tmp/wiki
+      - name: Synchronize validated Markdown
+        run: uv run python scripts/sync_wiki.py wiki /tmp/wiki
+      - name: Commit and push only when changed
+        working-directory: /tmp/wiki
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m "docs: publish validated research wiki"
+          git push origin HEAD:master

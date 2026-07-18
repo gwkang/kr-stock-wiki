@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: true
+          python-version: "3.13.5"
+      - run: uv sync --locked
+      - run: uv run pytest --cov=kr_stock_wiki --cov-report=term-missing
+      - run: uv run kr-stock-wiki lint --wiki wiki
+      - name: Verify sample report generation
+        run: |
+          uv run kr-stock-wiki run --input examples/post-market-signals.json --output build/wiki
+          test -f build/wiki/Candidates.md
+          uv run kr-stock-wiki lint --wiki build/wiki

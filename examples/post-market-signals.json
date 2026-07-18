@@ -1,0 +1,34 @@
+{
+  "as_of": "2026-07-20T20:30:00+09:00",
+  "mode": "post-market",
+  "candidates": [
+    {
+      "ticker": "005930",
+      "name": "삼성전자",
+      "risk_penalty": 5,
+      "signals": [
+        {
+          "group": "catalyst",
+          "score": 25,
+          "reason": "모의 공시 촉매 — 실제 투자 판단에 사용 금지",
+          "source_url": "https://dart.fss.or.kr/",
+          "observed_at": "2026-07-20T15:30:00+09:00"
+        },
+        {
+          "group": "price-volume",
+          "score": 20,
+          "reason": "모의 거래량 신호 — 실제 투자 판단에 사용 금지",
+          "source_url": "https://data.krx.co.kr/",
+          "observed_at": "2026-07-20T15:30:00+09:00"
+        },
+        {
+          "group": "cross-market",
+          "score": 10,
+          "reason": "모의 KRX·NXT 교차시장 신호 — 실제 투자 판단에 사용 금지",
+          "source_url": "https://www.nextrade.co.kr/",
+          "observed_at": "2026-07-20T20:00:00+09:00"
+        }
+      ]
+    }
+  ]
+}
