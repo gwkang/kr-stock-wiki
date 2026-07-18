@@ -20,7 +20,7 @@ REQUIRED = {
     "confidence",
 }
 CONFIDENCE = {"high", "medium", "low"}
-LINK_RE = re.compile(r"\[\[([^\]|#]+)")
+LINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 
 
 @dataclass(frozen=True)
@@ -40,7 +40,8 @@ def _frontmatter(text: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def _normalize_target(target: str) -> str | None:
+def _normalize_target(raw_link: str) -> str | None:
+    target = raw_link.split("|", 1)[-1].split("#", 1)[0]
     path = PurePosixPath(target.strip())
     if path.is_absolute() or ".." in path.parts:
         return None

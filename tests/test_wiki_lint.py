@@ -15,7 +15,7 @@ confidence: medium
 ---
 # Home
 
-See [[Methodology]].
+See [[분석 방법론|Methodology]].
 """
 
 
@@ -23,7 +23,7 @@ def test_lint_accepts_valid_frontmatter_and_wikilinks(tmp_path: Path):
     (tmp_path / "Home.md").write_text(VALID, encoding="utf-8")
     (tmp_path / "Methodology.md").write_text(
         VALID.replace("title: Home", "title: Methodology").replace(
-            "[[Methodology]]", "[[Home]]"
+            "[[분석 방법론|Methodology]]", "[[홈|Home]]"
         ),
         encoding="utf-8",
     )

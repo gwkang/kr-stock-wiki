@@ -56,7 +56,7 @@ def _support_page(
 
 def _ensure_support_pages(output_dir: Path, observed_at: datetime) -> None:
     pages = {
-        "Home.md": "# kr-stock-wiki\n\n- [[Candidates|후보종목]]\n- [[Methodology|분석 방법론]]",
+        "Home.md": "# kr-stock-wiki\n\n- [[후보종목|Candidates]]\n- [[분석 방법론|Methodology]]",
         "Methodology.md": (
             "# 분석 방법론\n\n일반 후보는 서로 다른 신호 그룹이 최소 2개 필요하며 "
             "1~5거래일 안에 재검토합니다.\n\n- [[Home]]\n- [[Candidates]]"
@@ -183,7 +183,7 @@ class ResearchHarness:
 
         links = (
             "\n".join(
-                f"- [[stocks/{path.stem}|{_markdown_text(report.name)}]] — "
+                f"- [[{_markdown_text(report.name)}|stocks/{path.stem}]] — "
                 f"{report.status}, {report.score:g}점"
                 for report, path in zip(reports, paths)
             )

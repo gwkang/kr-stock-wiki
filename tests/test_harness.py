@@ -47,6 +47,10 @@ def test_harness_runs_seven_roles_and_preserves_disagreement(tmp_path):
     assert "원문 조회가 필요" in report.agent_findings["disclosure-event"]
     assert "판정 후보" in report.agent_findings["editor-in-chief"]
     assert result.index_path.exists()
+    assert (
+        "[[삼성전자|stocks/005930-2026-07-20-post-market]]"
+        in result.index_path.read_text(encoding="utf-8")
+    )
     assert result.report_paths[0].exists()
 
 
