@@ -47,6 +47,49 @@ def test_cli_run_generates_wiki_from_json(tmp_path: Path):
     assert len(list((output / "stocks").glob("*.md"))) == 1
 
 
+def test_collect_news_writes_official_rss_snapshot(tmp_path: Path, monkeypatch):
+    record = EvidenceRecord(
+        source=EvidenceSource.OFFICIAL_NEWS,
+        evidence_id="yonhap:AKR20260718000100001",
+        canonical_event_id="yonhap:AKR20260718000100001",
+        kind="news-article",
+        company_name="연합뉴스",
+        title="반도체 수출 증가",
+        source_url="https://www.yna.co.kr/view/AKR20260718000100001",
+        published_date=date(2026, 7, 18),
+        fetched_at=datetime(2026, 7, 18, 20, 30, tzinfo=ZoneInfo("Asia/Seoul")),
+        verification=VerificationStatus.OFFICIAL,
+        metrics={"feed_categories": "economy,market"},
+    )
+    monkeypatch.setattr(
+        "kr_stock_wiki.cli.YonhapRssClient.latest",
+        lambda _client, begin, end: (
+            [record] if (begin, end) == (date(2026, 7, 18), date(2026, 7, 18)) else []
+        ),
+    )
+    output = tmp_path / "news.json"
+
+    code = main(
+        [
+            "collect-news",
+            "--begin",
+            "2026-07-18",
+            "--end",
+            "2026-07-18",
+            "--output",
+            str(output),
+        ]
+    )
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert code == 0
+    assert payload["schema_version"] == 1
+    assert payload["source"] == "official-news"
+    assert payload["coverage_complete"] is True
+    assert payload["feeds"] == ["economy", "industry", "market"]
+    assert payload["records"] == [record.to_dict()]
+
+
 def test_collect_nxt_writes_delayed_quotes_and_session_summary(
     tmp_path: Path, monkeypatch
 ):

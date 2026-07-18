@@ -12,6 +12,7 @@ from typing import Any
 
 from .collectors.dart import DartClient
 from .collectors.krx import KrxClient
+from .collectors.news import NewsFeed, YonhapRssClient
 from .collectors.nxt import NxtClient
 from .harness import ResearchHarness
 from .models import Candidate, Signal, SignalGroup
@@ -115,6 +116,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     nxt.add_argument("--date", required=True, type=date.fromisoformat)
     nxt.add_argument("--output", required=True, type=Path)
+    news = commands.add_parser(
+        "collect-news", help="연합뉴스 공식 RSS 기사를 수집합니다"
+    )
+    news.add_argument("--begin", required=True, type=date.fromisoformat)
+    news.add_argument("--end", required=True, type=date.fromisoformat)
+    news.add_argument("--output", required=True, type=Path)
     return parser
 
 
@@ -128,6 +135,31 @@ def main(argv: list[str] | None = None) -> int:
             print(f"입력 오류: {error}", file=sys.stderr)
             return 2
         print(f"generated={len(result.reports)} index={result.index_path}")
+        return 0
+    if args.command == "collect-news":
+        try:
+            records = YonhapRssClient().latest(args.begin, args.end)
+            payload = {
+                "schema_version": 1,
+                "source": "official-news",
+                "coverage_complete": True,
+                "publisher": "연합뉴스",
+                "feeds": [feed.value for feed in NewsFeed],
+                "collected_at": datetime.now().astimezone().isoformat(),
+                "begin": args.begin.isoformat(),
+                "end": args.end.isoformat(),
+                "records": [record.to_dict() for record in records],
+            }
+            _write_json_atomic(args.output, payload)
+        except (
+            OSError,
+            ValueError,
+            KeyError,
+            TypeError,
+        ) as error:
+            print(f"뉴스 수집 오류: {error}", file=sys.stderr)
+            return 2
+        print(f"collected={len(records)} output={args.output}")
         return 0
     if args.command == "collect-nxt":
         try:

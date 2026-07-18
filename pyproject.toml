@@ -3,7 +3,10 @@ name = "kr-stock-wiki"
 version = "0.1.0"
 description = "Evidence-first multi-agent harness for short-term Korean stock research"
 requires-python = ">=3.12"
-dependencies = ["PyYAML>=6.0.2"]
+dependencies = [
+    "defusedxml>=0.7.1",
+    "PyYAML>=6.0.2",
+]
 
 [project.scripts]
 kr-stock-wiki = "kr_stock_wiki.cli:main"
