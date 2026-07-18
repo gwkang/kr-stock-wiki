@@ -66,6 +66,27 @@ def test_evidence_rejects_non_integer_delay_metadata():
         )
 
 
+def test_evidence_rejects_non_finite_numeric_metric():
+    import pytest
+    from kr_stock_wiki.evidence import EvidenceRecord
+
+    with pytest.raises(ValueError, match="finite"):
+        EvidenceRecord(
+            source=EvidenceSource.KRX,
+            evidence_id="krx:1",
+            canonical_event_id="krx:1",
+            kind="daily-price",
+            company_name="Example",
+            title="Daily price",
+            source_url="https://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_trd",
+            published_date=date(2026, 7, 18),
+            fetched_at=datetime(2026, 7, 18, tzinfo=ZoneInfo("Asia/Seoul")),
+            verification=VerificationStatus.OFFICIAL,
+            ticker="005930",
+            metrics={"change_rate": float("nan")},
+        )
+
+
 def test_dart_rejects_market_wide_range_over_three_months():
     import pytest
 
@@ -205,7 +226,31 @@ def test_dart_search_collects_every_page_and_filters_corporation():
     ]
 
 
-def test_dart_correction_shares_canonical_event_with_original():
+def test_dart_recognizes_korean_correction_markers_only():
+    payload = """{
+      "status":"000", "message":"normal", "list":[
+        {"corp_cls":"Y","corp_name":"Example","corp_code":"00126380","stock_code":"005930","report_nm":"[기재정정] 사업보고서","rcept_no":"20260718000121","flr_nm":"Example","rcept_dt":"20260718","rm":"정"},
+        {"corp_cls":"Y","corp_name":"Example","corp_code":"00126380","stock_code":"005930","report_nm":"[첨부정정] 사업보고서","rcept_no":"20260718000122","flr_nm":"Example","rcept_dt":"20260718","rm":"정"},
+        {"corp_cls":"Y","corp_name":"Example","corp_code":"00126380","stock_code":"005930","report_nm":"[첨부추가] 사업보고서","rcept_no":"20260718000123","flr_nm":"Example","rcept_dt":"20260718","rm":""},
+        {"corp_cls":"Y","corp_name":"Example","corp_code":"00126380","stock_code":"005930","report_nm":"[변경등록] 사업보고서","rcept_no":"20260718000124","flr_nm":"Example","rcept_dt":"20260718","rm":""},
+        {"corp_cls":"Y","corp_name":"Example","corp_code":"00126380","stock_code":"005930","report_nm":"[연결] 사업보고서","rcept_no":"20260718000125","flr_nm":"Example","rcept_dt":"20260718","rm":"연"}
+      ]
+    }""".encode()
+
+    records = DartClient(
+        api_key="k" * 40, transport=lambda _url, _timeout: payload
+    ).search(date(2026, 7, 18), date(2026, 7, 18))
+
+    assert [record.is_correction for record in records] == [
+        True,
+        True,
+        True,
+        True,
+        False,
+    ]
+
+
+def test_dart_correction_keeps_stable_receipt_canonical_id():
     payload = """{
       "status":"000", "message":"normal", "list":[
         {"corp_cls":"Y","corp_name":"Example","corp_code":"00126380","stock_code":"005930","report_nm":"Major Event Report (Capital Increase)","rcept_no":"20260717000111","flr_nm":"Example","rcept_dt":"20260717","rm":""},
@@ -217,7 +262,8 @@ def test_dart_correction_shares_canonical_event_with_original():
     original, correction = client.search(date(2026, 7, 17), date(2026, 7, 18))
 
     assert original.evidence_id != correction.evidence_id
-    assert original.canonical_event_id == correction.canonical_event_id
+    assert original.canonical_event_id == original.evidence_id
+    assert correction.canonical_event_id == correction.evidence_id
     assert original.is_correction is False
     assert correction.is_correction is True
 

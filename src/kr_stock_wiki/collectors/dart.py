@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Callable
 from urllib.parse import urlencode, urlparse
@@ -13,6 +13,10 @@ from ..evidence import EvidenceRecord, EvidenceSource, VerificationStatus
 
 Transport = Callable[[str, float], bytes]
 Clock = Callable[[], datetime]
+_CORRECTION_PREFIX_RE = re.compile(
+    r"^\[(?:기재정정|첨부정정|첨부추가|변경등록|정정|Correction)\]\s*",
+    re.IGNORECASE,
+)
 
 
 class DartError(ValueError):
@@ -58,7 +62,9 @@ class DartClient:
         receipt = item["rcept_no"]
         evidence_id = f"dart:{receipt}"
         title = item["report_nm"].strip()
-        canonical_title = re.sub(r"^(?:\[[^\]]+\]\s*)+", "", title)
+        is_correction = bool(_CORRECTION_PREFIX_RE.match(title)) or "정" in item.get(
+            "rm", ""
+        )
         return EvidenceRecord(
             source=EvidenceSource.DART,
             evidence_id=evidence_id,
@@ -71,34 +77,10 @@ class DartClient:
             fetched_at=fetched_at,
             verification=VerificationStatus.OFFICIAL,
             ticker=item.get("stock_code") or None,
-            is_correction=canonical_title != title,
+            is_correction=is_correction,
             is_withdrawn="철" in item.get("rm", ""),
             raw=dict(item),
         )
-
-    def _link_corrections(self, records: list[EvidenceRecord]) -> list[EvidenceRecord]:
-        originals: dict[tuple[str, str], list[EvidenceRecord]] = {}
-        linked: dict[str, EvidenceRecord] = {}
-        ordered = sorted(
-            records,
-            key=lambda record: (
-                record.published_date,
-                record.is_correction,
-                record.evidence_id,
-            ),
-        )
-        for record in ordered:
-            corp_code = str(record.raw["corp_code"])
-            canonical_title = re.sub(r"^(?:\[[^\]]+\]\s*)+", "", record.title)
-            key = (corp_code, canonical_title)
-            if record.is_correction and originals.get(key):
-                record = replace(
-                    record, canonical_event_id=originals[key][-1].evidence_id
-                )
-            elif not record.is_correction:
-                originals.setdefault(key, []).append(record)
-            linked[record.evidence_id] = record
-        return [linked[record.evidence_id] for record in records]
 
     def search(
         self, begin: date, end: date, *, corp_code: str | None = None
@@ -165,4 +147,4 @@ class DartClient:
             if page >= total_pages:
                 break
             page += 1
-        return self._link_corrections(records)
+        return records

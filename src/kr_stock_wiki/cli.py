@@ -5,11 +5,13 @@ import json
 import math
 import os
 import sys
+import tempfile
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 from .collectors.dart import DartClient
+from .collectors.krx import KrxClient
 from .harness import ResearchHarness
 from .models import Candidate, Signal, SignalGroup
 from .wiki_lint import lint_wiki
@@ -52,6 +54,41 @@ def _load_candidates(path: Path) -> tuple[datetime, str, list[Candidate]]:
     return observed, data["mode"], candidates
 
 
+def _write_json_atomic(output: Path, payload: dict[str, Any]) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=output.parent,
+            prefix=f".{output.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            json.dump(
+                payload,
+                temporary,
+                ensure_ascii=False,
+                indent=2,
+                allow_nan=False,
+            )
+            temporary.write("\n")
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_path, output)
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        directory_fd = os.open(output.parent, directory_flags)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="kr-stock-wiki")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -67,6 +104,11 @@ def build_parser() -> argparse.ArgumentParser:
     dart.add_argument("--end", required=True, type=date.fromisoformat)
     dart.add_argument("--corp-code")
     dart.add_argument("--output", required=True, type=Path)
+    krx = commands.add_parser(
+        "collect-krx", help="KRX 공식 KOSPI·KOSDAQ 일별 시세를 수집합니다"
+    )
+    krx.add_argument("--date", required=True, type=date.fromisoformat)
+    krx.add_argument("--output", required=True, type=Path)
     return parser
 
 
@@ -81,6 +123,33 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         print(f"generated={len(result.reports)} index={result.index_path}")
         return 0
+    if args.command == "collect-krx":
+        api_key = os.environ.get("KRX_API_KEY")
+        if not api_key:
+            print("환경변수 KRX_API_KEY가 필요합니다", file=sys.stderr)
+            return 2
+        try:
+            records = KrxClient(api_key=api_key).daily_prices(args.date)
+            payload = {
+                "schema_version": 1,
+                "source": "krx",
+                "collected_at": datetime.now().astimezone().isoformat(),
+                "date": args.date.isoformat(),
+                "markets": ["KOSPI", "KOSDAQ"],
+                "records": [record.to_dict() for record in records],
+            }
+            _write_json_atomic(args.output, payload)
+        except (
+            OSError,
+            ValueError,
+            KeyError,
+            TypeError,
+            json.JSONDecodeError,
+        ) as error:
+            print(f"KRX 수집 오류: {error}", file=sys.stderr)
+            return 2
+        print(f"collected={len(records)} output={args.output}")
+        return 0
     if args.command == "collect-dart":
         api_key = os.environ.get("DART_API_KEY")
         if not api_key:
@@ -90,7 +159,6 @@ def main(argv: list[str] | None = None) -> int:
             records = DartClient(api_key=api_key).search(
                 args.begin, args.end, corp_code=args.corp_code
             )
-            args.output.parent.mkdir(parents=True, exist_ok=True)
             payload = {
                 "schema_version": 1,
                 "source": "dart",
@@ -100,12 +168,7 @@ def main(argv: list[str] | None = None) -> int:
                 "corp_code": args.corp_code,
                 "records": [record.to_dict() for record in records],
             }
-            temporary = args.output.with_suffix(args.output.suffix + ".tmp")
-            temporary.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            temporary.replace(args.output)
+            _write_json_atomic(args.output, payload)
         except (
             OSError,
             ValueError,

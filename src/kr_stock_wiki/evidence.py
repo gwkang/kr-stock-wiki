@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import StrEnum
@@ -35,6 +36,9 @@ class EvidenceRecord:
     delay_minutes: int | None = None
     is_correction: bool = False
     is_withdrawn: bool = False
+    metrics: dict[str, int | float | str | None] = field(
+        default_factory=dict, repr=False
+    )
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
@@ -53,6 +57,7 @@ class EvidenceRecord:
             "delay_minutes": self.delay_minutes,
             "is_correction": self.is_correction,
             "is_withdrawn": self.is_withdrawn,
+            "metrics": dict(self.metrics),
             "raw": dict(self.raw),
         }
 
@@ -72,3 +77,12 @@ class EvidenceRecord:
             len(self.ticker) != 6 or not self.ticker.isdigit()
         ):
             raise ValueError("ticker must be six digits")
+        for name, value in self.metrics.items():
+            if not isinstance(name, str) or not name:
+                raise ValueError("metric names must be non-empty strings")
+            if isinstance(value, bool) or not isinstance(
+                value, (int, float, str, type(None))
+            ):
+                raise ValueError("metric values must be JSON scalar values")
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ValueError("numeric metric values must be finite")
