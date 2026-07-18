@@ -3,11 +3,13 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from .collectors.dart import DartClient
 from .harness import ResearchHarness
 from .models import Candidate, Signal, SignalGroup
 from .wiki_lint import lint_wiki
@@ -58,6 +60,13 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--output", required=True, type=Path)
     lint = commands.add_parser("lint", help="Wiki 무결성을 검사합니다")
     lint.add_argument("--wiki", required=True, type=Path)
+    dart = commands.add_parser(
+        "collect-dart", help="OpenDART 공식 공시를 JSON 근거 스냅샷으로 수집합니다"
+    )
+    dart.add_argument("--begin", required=True, type=date.fromisoformat)
+    dart.add_argument("--end", required=True, type=date.fromisoformat)
+    dart.add_argument("--corp-code")
+    dart.add_argument("--output", required=True, type=Path)
     return parser
 
 
@@ -71,6 +80,42 @@ def main(argv: list[str] | None = None) -> int:
             print(f"입력 오류: {error}", file=sys.stderr)
             return 2
         print(f"generated={len(result.reports)} index={result.index_path}")
+        return 0
+    if args.command == "collect-dart":
+        api_key = os.environ.get("DART_API_KEY")
+        if not api_key:
+            print("환경변수 DART_API_KEY가 필요합니다", file=sys.stderr)
+            return 2
+        try:
+            records = DartClient(api_key=api_key).search(
+                args.begin, args.end, corp_code=args.corp_code
+            )
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "schema_version": 1,
+                "source": "dart",
+                "collected_at": datetime.now().astimezone().isoformat(),
+                "begin": args.begin.isoformat(),
+                "end": args.end.isoformat(),
+                "corp_code": args.corp_code,
+                "records": [record.to_dict() for record in records],
+            }
+            temporary = args.output.with_suffix(args.output.suffix + ".tmp")
+            temporary.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(args.output)
+        except (
+            OSError,
+            ValueError,
+            KeyError,
+            TypeError,
+            json.JSONDecodeError,
+        ) as error:
+            print(f"DART 수집 오류: {error}", file=sys.stderr)
+            return 2
+        print(f"collected={len(records)} output={args.output}")
         return 0
     issues = lint_wiki(args.wiki)
     for issue in issues:

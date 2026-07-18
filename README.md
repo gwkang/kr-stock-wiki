@@ -13,9 +13,10 @@
 - 출처와 반대 의견이 포함된 Markdown 리포트
 - YAML frontmatter 및 깨진 Wikilink 검사
 - 실제 GitHub Wiki 저장소에 복사할 동기화 엔진
+- 공식 OpenDART 공시검색 수집기와 공통 근거 데이터 계약
 - CLI, pytest, GitHub Actions CI
 
-실시간 DART·KRX·NXT·뉴스 수집기는 아직 연결되지 않았습니다. 하네스는 검증된 JSON 입력을 받으며, 샘플 데이터는 실행 검증용으로만 사용합니다.
+OpenDART 수집기는 구현됐으며 API 키를 연결하면 공식 공시 스냅샷을 생성할 수 있습니다. KRX·NXT·수급·뉴스 수집기는 아직 연결되지 않았습니다. 샘플 데이터는 실행 검증용으로만 사용합니다.
 
 ## 설치와 테스트
 
@@ -33,6 +34,30 @@ uv run kr-stock-wiki run \
 
 uv run kr-stock-wiki lint --wiki build/wiki
 ```
+
+## OpenDART 공시 수집
+
+OpenDART 인증키는 명령행 인자가 아니라 환경변수로만 전달합니다. 키와 수집 결과는 저장소에 커밋하지 않습니다.
+
+```bash
+export DART_API_KEY="발급받은-40자리-인증키"
+uv run kr-stock-wiki collect-dart \
+  --begin 2026-07-18 \
+  --end 2026-07-18 \
+  --output build/evidence/dart-2026-07-18.json
+```
+
+특정 회사만 장기간 조회할 때는 8자리 DART 고유번호를 지정합니다.
+
+```bash
+uv run kr-stock-wiki collect-dart \
+  --begin 2026-01-01 \
+  --end 2026-07-18 \
+  --corp-code 00126380 \
+  --output build/evidence/dart-00126380.json
+```
+
+수집기는 페이지당 100건 제한을 자동 순회하고, 페이지 경계 중복을 제거하며, 동일 수집 범위에 원공시가 있을 때 정정공시를 연결합니다. 공식 원문 URL·수집 시각·검증 상태·원본 응답을 보존합니다. 회사 고유번호가 없는 시장 전체 검색은 OpenDART 공식 제한에 따라 최대 3개월입니다.
 
 ## 입력 계약
 
