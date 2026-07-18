@@ -61,8 +61,8 @@ class Candidate:
     hard_exclusion: str | None = None
 
     def __post_init__(self) -> None:
-        if not re.fullmatch(r"\d{6}", self.ticker):
-            raise ValueError("ticker는 6자리 숫자여야 합니다")
+        if not re.fullmatch(r"[0-9A-Z]{6}", self.ticker):
+            raise ValueError("ticker는 6자리 대문자 영숫자여야 합니다")
         if (
             not self.name
             or len(self.name) > 100

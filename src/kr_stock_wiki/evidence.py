@@ -74,9 +74,14 @@ class EvidenceRecord:
         ):
             raise ValueError("delay_minutes must be a non-negative integer")
         if self.ticker is not None and (
-            len(self.ticker) != 6 or not self.ticker.isdigit()
+            len(self.ticker) != 6
+            or not self.ticker.isascii()
+            or not self.ticker.isalnum()
+            or self.ticker != self.ticker.upper()
         ):
-            raise ValueError("ticker must be six digits")
+            raise ValueError(
+                "ticker must be six uppercase ASCII alphanumeric characters"
+            )
         for name, value in self.metrics.items():
             if not isinstance(name, str) or not name:
                 raise ValueError("metric names must be non-empty strings")

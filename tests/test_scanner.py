@@ -129,10 +129,16 @@ def test_signal_rejects_non_finite_score():
         )
 
 
+def test_candidate_accepts_current_alphanumeric_krx_short_code():
+    candidate = Candidate("0126Z0", "삼성에피스홀딩스", [])
+
+    assert candidate.ticker == "0126Z0"
+
+
 def test_candidate_rejects_path_traversal_ticker():
     import pytest
 
-    with pytest.raises(ValueError, match="6자리 숫자"):
+    with pytest.raises(ValueError, match="6자리 대문자 영숫자"):
         Candidate("../../escaped", "위험종목", [])
 
 

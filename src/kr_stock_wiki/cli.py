@@ -12,6 +12,7 @@ from typing import Any
 
 from .collectors.dart import DartClient
 from .collectors.krx import KrxClient
+from .collectors.nxt import NxtClient
 from .harness import ResearchHarness
 from .models import Candidate, Signal, SignalGroup
 from .wiki_lint import lint_wiki
@@ -109,6 +110,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     krx.add_argument("--date", required=True, type=date.fromisoformat)
     krx.add_argument("--output", required=True, type=Path)
+    nxt = commands.add_parser(
+        "collect-nxt", help="NXT 공식 20분 지연 시세와 세션별 거래 현황을 수집합니다"
+    )
+    nxt.add_argument("--date", required=True, type=date.fromisoformat)
+    nxt.add_argument("--output", required=True, type=Path)
     return parser
 
 
@@ -122,6 +128,33 @@ def main(argv: list[str] | None = None) -> int:
             print(f"입력 오류: {error}", file=sys.stderr)
             return 2
         print(f"generated={len(result.reports)} index={result.index_path}")
+        return 0
+    if args.command == "collect-nxt":
+        try:
+            client = NxtClient()
+            records = client.daily_quotes(args.date)
+            summary = client.session_summary(args.date)
+            if summary is not None:
+                records.append(summary)
+            payload = {
+                "schema_version": 1,
+                "source": "nxt",
+                "collected_at": datetime.now().astimezone().isoformat(),
+                "date": args.date.isoformat(),
+                "quote_delay_minutes": 20,
+                "records": [record.to_dict() for record in records],
+            }
+            _write_json_atomic(args.output, payload)
+        except (
+            OSError,
+            ValueError,
+            KeyError,
+            TypeError,
+            json.JSONDecodeError,
+        ) as error:
+            print(f"NXT 수집 오류: {error}", file=sys.stderr)
+            return 2
+        print(f"collected={len(records)} output={args.output}")
         return 0
     if args.command == "collect-krx":
         api_key = os.environ.get("KRX_API_KEY")

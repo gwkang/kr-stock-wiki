@@ -47,6 +47,77 @@ def test_cli_run_generates_wiki_from_json(tmp_path: Path):
     assert len(list((output / "stocks").glob("*.md"))) == 1
 
 
+def test_collect_nxt_writes_delayed_quotes_and_session_summary(
+    tmp_path: Path, monkeypatch
+):
+    fetched_at = datetime(2026, 7, 18, 9, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+    quote = EvidenceRecord(
+        source=EvidenceSource.NXT,
+        evidence_id="nxt:price-snapshot:20260716:000660",
+        canonical_event_id="nxt:price-snapshot:20260716:000660",
+        kind="price-snapshot",
+        company_name="SK hynix",
+        title="SK hynix NXT daily price",
+        source_url=(
+            "https://www.nextrade.co.kr/menu/transactionStatusMain/menuList.do"
+        ),
+        published_date=date(2026, 7, 16),
+        fetched_at=fetched_at,
+        verification=VerificationStatus.OFFICIAL,
+        ticker="000660",
+        delay_minutes=20,
+        metrics={"current_price": 183000},
+    )
+    summary = EvidenceRecord(
+        source=EvidenceSource.NXT,
+        evidence_id="nxt:session-summary:20260716",
+        canonical_event_id="nxt:session-summary:20260716",
+        kind="session-summary",
+        company_name="NEXTRADE",
+        title="NXT session summary",
+        source_url=(
+            "https://www.nextrade.co.kr/menu/transactionStatusDaily/menuList.do"
+        ),
+        published_date=date(2026, 7, 16),
+        fetched_at=fetched_at,
+        verification=VerificationStatus.OFFICIAL,
+        metrics={"pre_volume": 1, "main_volume": 2, "after_volume": 3},
+    )
+    monkeypatch.setattr(
+        "kr_stock_wiki.cli.NxtClient.daily_quotes",
+        lambda _client, business_date: (
+            [quote] if business_date == date(2026, 7, 16) else []
+        ),
+    )
+    monkeypatch.setattr(
+        "kr_stock_wiki.cli.NxtClient.session_summary",
+        lambda _client, _business_date: summary,
+    )
+    output = tmp_path / "nxt.json"
+
+    code = main(
+        [
+            "collect-nxt",
+            "--date",
+            "2026-07-16",
+            "--output",
+            str(output),
+        ]
+    )
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert code == 0
+    assert payload["schema_version"] == 1
+    assert payload["source"] == "nxt"
+    assert payload["quote_delay_minutes"] == 20
+    assert "delay_minutes" not in payload
+    assert len(payload["records"]) == 2
+    assert {record["kind"] for record in payload["records"]} == {
+        "price-snapshot",
+        "session-summary",
+    }
+
+
 def test_collect_krx_writes_versioned_snapshot(tmp_path: Path, monkeypatch):
     record = EvidenceRecord(
         source=EvidenceSource.KRX,
