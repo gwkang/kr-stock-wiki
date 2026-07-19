@@ -27,7 +27,7 @@ uv run pytest
 
 ## 리포트 생성
 
-`run`은 구조 예제만으로 실행되지 않습니다. 후보 신호의 `business_date`와 일치하는 완전한 KRX 양시장 스냅샷, 분석일과 일치하는 후보별 KIND 상태 스냅샷이 모두 필요합니다.
+`run`은 구조 예제만으로 실행되지 않습니다. 후보 신호의 `business_date`와 일치하는 완전한 KRX 양시장 스냅샷, 분석일과 일치하는 후보별 KIND 상태 스냅샷이 모두 필요합니다. 연간 휴장일 calendar만으로는 당일 실제 운영상태를 증명할 수 없으므로 `pre-market` 실행은 아직 fail-closed로 차단됩니다.
 
 ```bash
 uv run kr-stock-wiki run \
@@ -78,6 +78,20 @@ uv run kr-stock-wiki collect-krx \
 
 KOSPI·KOSDAQ의 종가, 등락률, 시가·고가·저가, 거래량·거래대금, 시가총액, 상장주식 수를 공식 KRX 응답에서 정규화합니다. 인증키는 결과의 출처 URL, 오류 메시지, 예외 traceback 및 스냅샷에 기록하지 않습니다. 성공 스냅샷은 요청 시장·완료 시장·시장별 실제 레코드 수를 함께 저장합니다. 메타데이터·레코드 일관성 및 ticker 유일성뿐 아니라 운영 기본값으로 KOSPI 500건·KOSDAQ 1,000건의 보수적 cardinality 하한을 요구합니다. 0건은 휴장으로 추정하지 않고 `unknown`, 1건 이상이지만 하한 미만이면 부분 응답으로 거부합니다. KRX 응답에 독립 total-count가 없어 이 하한은 절대적 전체성 증명이 아닌 gross truncation 방어선이며, 향후 공식 상장 유니버스 대조로 강화해야 합니다.
 
+## KRX 공식 휴장일 캘린더 수집
+
+Global KRX의 `Market Closing(Holiday)` 페이지와 페이지가 직접 사용하는 공식 OTP·JSON 요청을 통해 선택 연도의 KRX 휴장일을 수집합니다. 인증키는 필요하지 않습니다.
+
+```bash
+uv run kr-stock-wiki collect-calendar \
+  --year 2026 \
+  --output build/evidence/krx-calendar-2026.json
+```
+
+collector는 `https://global.krx.co.kr/contents/GLB/05/0501/0501110000/GLB0501110000.jsp` 세션을 연 뒤 공식 `GenerateOTP.jspx`와 `GLB99000001.jspx` 요청만 사용합니다. 자동 redirect를 차단하고 exact HTTPS URL, 2 MiB 응답 상한, 필수 날짜·요일 필드, 날짜 정렬·유일성·선택 연도 일치 여부를 검증합니다. 응답에 독립 total-count가 없으므로 연간 최소 10건과 1월 1일·12월 31일 anchor를 gross-truncation 방어선으로 사용합니다. `holdy_eng_nm`은 공식 응답에서 빈 문자열일 수 있으므로 휴장 여부와 분리해 그대로 허용합니다.
+
+이 artifact는 **예정 휴장일 목록**일 뿐 실시간 `OPEN/CLOSED` 또는 세션 시작시각 자료가 아닙니다. 목록에 없는 평일은 `scheduled trading day` 후보일 뿐 실제 개장이 확인된 날로 승격하지 않습니다. 비상휴장·수능일 지연 개장·연초 변경 등 공식 당일 시장운영 공지가 별도로 검증되기 전에는 pre-market gate를 열지 않습니다. JSON artifact는 collector가 원자적으로 저장한 로컬 파일을 신뢰 경계로 삼으며 암호학적 서명 문서가 아니므로, 쓰기 권한이 없는 경로에서 운영해야 합니다.
+
 ## KRX KIND 투자유의 상태 수집
 
 분석일 당일의 각 후보를 대상으로 KIND 공식 관리종목·매매거래정지 현재 목록과 최근 3년 투자경고·투자위험 지정/해제 이력을 조회합니다. 별도 인증키가 필요하지 않습니다.
@@ -119,7 +133,7 @@ uv run kr-stock-wiki collect-news \
 
 ## 거래일 및 운영 필터
 
-`TradingDayGate`는 토·일요일을 휴장으로 처리하고, 평일에는 같은 기준일의 공식 KRX 검증 스냅샷이 KOSPI·KOSDAQ 양 endpoint 완료, 시장별 cardinality 하한, ticker 유일성을 모두 충족할 때만 `open`으로 판정합니다. 임의 EvidenceRecord 목록은 입력으로 받지 않습니다. 평일에 스냅샷이 없거나 endpoint 완료가 빠지거나 어느 시장의 레코드가 0건이면 휴장으로 추정하지 않고 `unknown`, 1건 이상이지만 운영 하한 미만이면 부분 응답으로 처리합니다. 07:30 프리마켓에는 이전 거래일 가격만 있어 당일 평일 공휴일을 증명할 수 없으므로, 공식 KRX 당일 개장 캘린더가 연결될 때까지 CLI 실행을 fail-closed로 거부합니다. 현재 안전하게 실행 가능한 경로는 당일 양시장 데이터가 확정된 post-market입니다.
+`TradingDayGate`는 토·일요일을 휴장으로 처리하고, post-market 평일에는 같은 기준일의 공식 KRX 검증 스냅샷이 KOSPI·KOSDAQ 양 endpoint 완료, 시장별 cardinality 하한, ticker 유일성을 모두 충족할 때만 `open`으로 판정합니다. 임의 EvidenceRecord 목록은 입력으로 받지 않습니다. 평일에 스냅샷이 없거나 endpoint 완료가 빠지거나 어느 시장의 레코드가 0건이면 휴장으로 추정하지 않고 `unknown`, 1건 이상이지만 운영 하한 미만이면 부분 응답으로 처리합니다. 연간 calendar는 예정 휴장일을 판정하는 보조 근거로만 수집합니다. 평일이 목록에 없다는 음성 근거만으로 당일 실제 개장이나 정규 세션 시각을 확정하지 않으며, 별도의 공식 KRX 당일 운영상태 근거가 연결될 때까지 07:30 pre-market 실행은 CLI와 `ResearchHarness` 직접 호출 모두에서 fail-closed로 차단합니다.
 
 `OperationalFilter`의 기본 유동성 하한은 종가 1,000원, 거래량 100,000주, 거래대금 50억원, 시가총액 1,000억원입니다. 기준은 생성자 인자로 명시적으로 변경할 수 있습니다. 관리종목·거래정지·투자경고는 KIND 공식 `listing-risk-status` 근거의 정수 `0/1` 값으로 확인돼야 하며 근거가 없거나 출처·ticker·기준일이 불일치하면 fail-closed로 후보에서 제외되거나 입력을 거부합니다. `as_of` 이후 수집된 근거는 금지하며 KIND는 최대 1시간, KRX 일별 스냅샷은 최대 12시간 이내 freshness를 요구합니다. `ResearchHarness.run`은 임의 운영 판정 map을 받지 않고 모든 후보와 정확히 일치하는 `OperationalEvidence` map의 KRX 가격·KIND 위험 근거를 자체 검증해 판정을 재계산하므로 직접 호출에서도 `eligible=True` 주입으로 필터를 우회할 수 없습니다.
 

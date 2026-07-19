@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from .collectors.calendar import KrxCalendarClient
 from .collectors.dart import DartClient
 from .collectors.kind import KindClient
 from .collectors.krx import KrxClient, KrxDailySnapshot
@@ -251,6 +252,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     krx.add_argument("--date", required=True, type=date.fromisoformat)
     krx.add_argument("--output", required=True, type=Path)
+    calendar = commands.add_parser(
+        "collect-calendar", help="Global KRX 공식 연간 휴장일 캘린더를 수집합니다"
+    )
+    calendar.add_argument("--year", required=True, type=int)
+    calendar.add_argument("--output", required=True, type=Path)
     kind = commands.add_parser(
         "collect-kind", help="KRX KIND 공식 관리·정지·투자경고 상태를 수집합니다"
     )
@@ -278,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
             observed, business_date, mode, candidates = _load_candidates(args.input)
             if mode == "pre-market":
                 raise ValueError(
-                    "pre-market 실행에는 공식 KRX 당일 개장 캘린더가 필요합니다"
+                    "pre-market 실행에는 캘린더 외에 공식 KRX 당일 운영상태 근거가 필요합니다"
                 )
             krx_snapshot = _load_krx_snapshot(args.krx_snapshot)
             listing_risks = _load_listing_risks(
@@ -304,6 +310,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"입력 오류: {error}", file=sys.stderr)
             return 2
         print(f"generated={len(result.reports)} index={result.index_path}")
+        return 0
+    if args.command == "collect-calendar":
+        try:
+            snapshot = KrxCalendarClient().annual_calendar(args.year)
+            _write_json_atomic(args.output, snapshot.to_payload())
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            print(f"KRX 캘린더 수집 오류: {error}", file=sys.stderr)
+            return 2
+        print(f"collected={len(snapshot.holidays)} output={args.output}")
         return 0
     if args.command == "collect-kind":
         try:

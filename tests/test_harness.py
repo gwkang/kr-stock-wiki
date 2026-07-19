@@ -214,7 +214,9 @@ def test_harness_requires_and_applies_operational_evidence(tmp_path):
     assert result.reports == []
 
 
-def test_harness_rejects_pre_market_without_official_calendar(tmp_path):
+def test_harness_rejects_pre_market_without_official_same_day_operating_status(
+    tmp_path,
+):
     import pytest
 
     observed = datetime(2026, 7, 20, 7, 30, tzinfo=ZoneInfo("Asia/Seoul"))
@@ -228,7 +230,7 @@ def test_harness_rejects_pre_market_without_official_calendar(tmp_path):
         ],
     )
 
-    with pytest.raises(ValueError, match="공식 KRX 당일 개장 캘린더"):
+    with pytest.raises(ValueError, match="공식 KRX 당일 운영상태"):
         ResearchHarness().run(
             [candidate],
             observed,

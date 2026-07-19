@@ -149,8 +149,9 @@ class ResearchHarness:
             raise ValueError("observed_at must include a timezone")
         if mode == "pre-market":
             raise ValueError(
-                "pre-market 실행에는 공식 KRX 당일 개장 캘린더 근거가 필요합니다"
+                "pre-market 실행에는 캘린더 외에 공식 KRX 당일 운영상태 근거가 필요합니다"
             )
+        analysis_date = observed_at.astimezone(_KST).date()
         tickers = [candidate.ticker for candidate in candidates]
         if len(tickers) != len(set(tickers)):
             raise ValueError("중복 종목코드는 허용되지 않습니다")
@@ -158,7 +159,6 @@ class ResearchHarness:
             raise ValueError("모든 후보와 정확히 일치하는 운영 근거가 필요합니다")
         policy = OperationalFilter()
         decisions: dict[str, OperationalDecision] = {}
-        analysis_date = observed_at.astimezone(_KST).date()
         for ticker, evidence in operational_evidence.items():
             if evidence.ticker != ticker:
                 raise ValueError("운영 근거 map의 ticker가 일치하지 않습니다")
@@ -169,7 +169,7 @@ class ResearchHarness:
                 or observed_at - price.fetched_at > timedelta(hours=12)
             ):
                 raise ValueError(
-                    "KRX 가격 근거는 분석일 당일 12시간 이내에 수집돼야 합니다"
+                    "KRX 가격 근거는 기대 거래일 기준이며 12시간 이내에 수집돼야 합니다"
                 )
             risk_record = evidence.listing_risk.evidence
             if risk_record is not None and (

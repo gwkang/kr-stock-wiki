@@ -9,6 +9,11 @@ from kr_stock_wiki.cli import (
     _operational_evidence,
     main,
 )
+from kr_stock_wiki.collectors.calendar import (
+    CALENDAR_SOURCE_URL,
+    KrxMarketCalendar,
+    MarketHoliday,
+)
 from kr_stock_wiki.collectors.krx import KrxDailySnapshot, KrxMarket
 from kr_stock_wiki.evidence import EvidenceRecord, EvidenceSource, VerificationStatus
 
@@ -581,7 +586,51 @@ def test_cli_reports_malformed_json_without_traceback(tmp_path: Path, capsys):
     assert "입력 오류" in capsys.readouterr().err
 
 
-def test_cli_run_fails_closed_for_pre_market_without_official_day_calendar(
+def test_collect_calendar_writes_official_snapshot(tmp_path: Path, monkeypatch):
+    fetched_at = datetime(2026, 7, 20, 7, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+    days = (
+        date(2026, 1, 1),
+        date(2026, 2, 16),
+        date(2026, 2, 17),
+        date(2026, 2, 18),
+        date(2026, 3, 2),
+        date(2026, 5, 1),
+        date(2026, 5, 5),
+        date(2026, 5, 25),
+        date(2026, 6, 3),
+        date(2026, 7, 17),
+        date(2026, 12, 31),
+    )
+    snapshot = KrxMarketCalendar(
+        year=2026,
+        holidays=tuple(
+            MarketHoliday(day, day.strftime("%a").upper(), day.strftime("%A"), "")
+            for day in days
+        ),
+        fetched_at=fetched_at,
+    )
+    monkeypatch.setattr(
+        "kr_stock_wiki.cli.KrxCalendarClient.annual_calendar",
+        lambda _client, year: snapshot if year == 2026 else None,
+    )
+    output = tmp_path / "calendar.json"
+
+    code = main(
+        [
+            "collect-calendar",
+            "--year",
+            "2026",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert code == 0
+    assert json.loads(output.read_text(encoding="utf-8")) == snapshot.to_payload()
+    assert snapshot.source_url == CALENDAR_SOURCE_URL
+
+
+def test_cli_run_fails_closed_without_official_same_day_operating_status(
     tmp_path: Path, capsys
 ):
     source = tmp_path / "pre-market.json"
@@ -612,7 +661,7 @@ def test_cli_run_fails_closed_for_pre_market_without_official_day_calendar(
     )
 
     assert code == 2
-    assert "공식 KRX 당일 개장 캘린더" in capsys.readouterr().err
+    assert "공식 KRX 당일 운영상태" in capsys.readouterr().err
     assert not (tmp_path / "wiki").exists()
 
 
