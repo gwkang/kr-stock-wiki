@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from .collectors.calendar import KrxCalendarClient
 from .collectors.dart import DartClient
 from .collectors.kind import KindClient
+from .collectors.kind_market_notices import KindMarketNoticeClient
 from .collectors.krx import KrxClient, KrxDailySnapshot
 from .collectors.market_notices import KrxMarketNoticeClient
 from .collectors.news import NewsFeed, YonhapRssClient
@@ -265,6 +266,12 @@ def build_parser() -> argparse.ArgumentParser:
     notices.add_argument("--begin", required=True, type=date.fromisoformat)
     notices.add_argument("--end", required=True, type=date.fromisoformat)
     notices.add_argument("--output", required=True, type=Path)
+    notice_detail = commands.add_parser(
+        "collect-kind-market-notice",
+        help="KIND 공식 시장운영 공지 상세본문을 검증된 JSON artifact로 수집합니다",
+    )
+    notice_detail.add_argument("--acceptance-number", required=True)
+    notice_detail.add_argument("--output", required=True, type=Path)
     kind = commands.add_parser(
         "collect-kind", help="KRX KIND 공식 관리·정지·투자경고 상태를 수집합니다"
     )
@@ -318,6 +325,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"입력 오류: {error}", file=sys.stderr)
             return 2
         print(f"generated={len(result.reports)} index={result.index_path}")
+        return 0
+    if args.command == "collect-kind-market-notice":
+        try:
+            notice = KindMarketNoticeClient().document(args.acceptance_number)
+            _write_json_atomic(args.output, notice.to_payload())
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            print(f"KIND 시장운영 공지 상세 수집 오류: {error}", file=sys.stderr)
+            return 2
+        print(f"collected=1 output={args.output}")
         return 0
     if args.command == "collect-market-notices":
         try:

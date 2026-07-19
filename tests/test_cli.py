@@ -14,6 +14,11 @@ from kr_stock_wiki.collectors.calendar import (
     KrxMarketCalendar,
     MarketHoliday,
 )
+from kr_stock_wiki.collectors.kind_market_notices import (
+    KindMarketNotice,
+    KindMarketNoticeEvent,
+    KindMarketNoticeEventType,
+)
 from kr_stock_wiki.collectors.market_notices import (
     KrxMarketNotice,
     KrxMarketNoticeSnapshot,
@@ -712,6 +717,83 @@ def test_collect_market_notices_failure_preserves_existing_snapshot(
             "2026-07-01",
             "--end",
             "2026-07-20",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert code == 2
+    assert output.read_text(encoding="utf-8") == "trusted-previous-snapshot"
+
+
+def test_collect_kind_market_notice_writes_verified_detail_snapshot(
+    tmp_path: Path, monkeypatch
+):
+    notice = KindMarketNotice(
+        acceptance_number="20250520000110",
+        document_number="20250520000087",
+        title="휴장안내",
+        prior_document_numbers=(),
+        init_url=(
+            "https://kind.krx.co.kr/common/disclsviewer.do?"
+            "method=searchInitInfo&acptNo=20250520000110"
+        ),
+        document_url=(
+            "https://kind.krx.co.kr/external/2025/05/20/000110/20250520000087/99340.htm"
+        ),
+        fetched_at=datetime(2026, 7, 20, 7, 0, tzinfo=ZoneInfo("Asia/Seoul")),
+        init_html=("<option value='20250520000087|Y' selected>휴장안내</option>"),
+        wrapper_html=(
+            "<iframe src='/external/2025/05/20/000110/"
+            "20250520000087/99340.htm'></iframe>"
+        ),
+        body_html=("<html><body>유가증권시장 휴장일자 2025년 6월 3일</body></html>"),
+        body_text="유가증권시장 휴장일자 2025년 6월 3일",
+        events=(
+            KindMarketNoticeEvent(
+                event_type=KindMarketNoticeEventType.CLOSED,
+                effective_date=date(2025, 6, 3),
+                markets=("KOSPI",),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "kr_stock_wiki.cli.KindMarketNoticeClient.document",
+        lambda _client, acceptance_number: (
+            notice if acceptance_number == "20250520000110" else None
+        ),
+    )
+    output = tmp_path / "kind-market-notice.json"
+
+    code = main(
+        [
+            "collect-kind-market-notice",
+            "--acceptance-number",
+            "20250520000110",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert code == 0
+    assert json.loads(output.read_text(encoding="utf-8")) == notice.to_payload()
+
+
+def test_collect_kind_market_notice_failure_preserves_existing_snapshot(
+    tmp_path: Path, monkeypatch
+):
+    output = tmp_path / "kind-market-notice.json"
+    output.write_text("trusted-previous-snapshot", encoding="utf-8")
+
+    def fail(*_args):
+        raise ValueError("partial KIND document chain")
+
+    monkeypatch.setattr("kr_stock_wiki.cli.KindMarketNoticeClient.document", fail)
+    code = main(
+        [
+            "collect-kind-market-notice",
+            "--acceptance-number",
+            "20250520000110",
             "--output",
             str(output),
         ]

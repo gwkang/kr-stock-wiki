@@ -103,7 +103,19 @@ uv run kr-stock-wiki collect-market-notices \
 
 collector는 KRX Data Marketplace의 공식 화면 `https://data.krx.co.kr/contents/MMC/NOTI/noti/MMCNOTI001.cmd`가 사용하는 공개 JSON POST 계약을 사용합니다. `mktId=ALL`, 기간 검색, page size 100으로 조회하고 `TOTAL_COUNT`, `CUR_PAGE`, `ROW_NUMBER`, 공지 ID, 게시일을 대조해 모든 페이지를 완주한 경우에만 snapshot을 발행합니다. exact HTTPS URL, redirect 차단, 페이지당 2 MiB 상한, 최대 367일·100,000건·1,000페이지 안전 한계를 적용하며 raw 원문 필드를 보존합니다. 긴 범위는 요청 수가 많으므로 짧은 rolling window 수집을 권장합니다.
 
-이 공지는 휴장·수능일 지연개장·연말/연초 거래시간 변경 같은 **예외를 탐지해 분석을 거부하거나 연기하는 veto evidence**입니다. 매일 정상 운영을 선언하는 heartbeat가 아니며, 공지 부재·검색 결과 없음은 정상개장 positive evidence가 아닙니다. 시장 메타데이터가 실제 적용 시장과 일치하지 않는 사례가 있고 NXT도 포함하지 않으므로, 이 snapshot만으로 pre-market gate를 열지 않습니다. 현재 collector는 목록과 provenance를 보존할 뿐 본문 적용일·정정 관계·적용 시장을 자동 판정하지 않습니다.
+이 공지는 휴장·수능일 지연개장·연말/연초 거래시간 변경 같은 **예외를 탐지해 분석을 거부하거나 연기하는 veto evidence**입니다. 매일 정상 운영을 선언하는 heartbeat가 아니며, 공지 부재·검색 결과 없음은 정상개장 positive evidence가 아닙니다. 시장 메타데이터가 실제 적용 시장과 일치하지 않는 사례가 있고 NXT도 포함하지 않으므로, 이 snapshot만으로 pre-market gate를 열지 않습니다.
+
+DRV 공지의 `BBS_SEQ`가 KIND 접수번호(`acptNo`)인 경우에는 상세문서를 별도 수집할 수 있습니다.
+
+```bash
+uv run kr-stock-wiki collect-kind-market-notice \
+  --acceptance-number 20250520000110 \
+  --output build/evidence/kind-market-notice-20250520000110.json
+```
+
+상세 collector는 KIND 공식 `searchInitInfo`에서 selected `docNo`와 이전 `|N` 문서번호를 확인하고, 같은 viewer의 `searchContents` POST를 거쳐 `https://kind.krx.co.kr/external/...` 원문 HTML을 가져옵니다. acptNo의 게시일·6자리 suffix, docNo, external 경로를 서로 결합 검증하고 exact HTTPS URL, `text/html` media type, redirect 차단, 단계별 2 MiB 상한을 적용합니다. init page, wrapper, external body 원문을 모두 artifact에 보존하며 load 시 원문에서 체인과 파생 필드를 다시 계산해 **경로·정규화 결과의 불일치**를 거부합니다. artifact 자체를 함께 수정할 수 있는 공격자에 대한 암호학적 변조 방지는 제공하지 않으므로, 쓰기 권한이 제한된 경로에서 운영해야 합니다. 보존된 HTML은 **증거 원문일 뿐 신뢰된 표시 콘텐츠가 아니므로** Wiki나 UI에 그대로 렌더링하지 않고, 향후 표시가 필요하면 별도 sanitization을 적용해야 합니다.
+
+현재 구조화 parser는 본문에 명시된 `휴장일자`와 **단일 지원 시장명**이 함께 있고 날짜 label·후보가 각각 하나뿐인 휴장, 또는 유일한 `시행일`과 비부정형 `거래시간 변경` 표현 및 **단일 지원 시장명**이 함께 있는 세션 변경만 event로 승격합니다. NXT·대체거래소 같은 미지원 시장이 함께 있거나 복수 날짜·부정형·알 수 없는 양식이면 본문을 보존하되 `structured_complete: false`로 남겨 자동 정상 판정에 사용하지 않습니다. selected 문서 제목에 `정정`이 있으면 `is_correction: true`로 표시하고, 같은 viewer의 이전 `|N` docNo는 `prior_document_numbers`로 보존합니다. 이는 한 접수건 안의 공식 문서 버전 lineage일 뿐 별도 원 공지의 접수번호를 뜻하지 않으므로 `replaces_acceptance_number` 같은 관계는 추정하지 않습니다. 이 상세 artifact 역시 예외 veto를 강화할 뿐 정상개장 positive evidence가 아닙니다.
 
 ## KRX KIND 투자유의 상태 수집
 
