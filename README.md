@@ -92,6 +92,19 @@ collector는 `https://global.krx.co.kr/contents/GLB/05/0501/0501110000/GLB050111
 
 이 artifact는 **예정 휴장일 목록**일 뿐 실시간 `OPEN/CLOSED` 또는 세션 시작시각 자료가 아닙니다. 목록에 없는 평일은 `scheduled trading day` 후보일 뿐 실제 개장이 확인된 날로 승격하지 않습니다. 비상휴장·수능일 지연 개장·연초 변경 등 공식 당일 시장운영 공지가 별도로 검증되기 전에는 pre-market gate를 열지 않습니다. JSON artifact는 collector가 원자적으로 저장한 로컬 파일을 신뢰 경계로 삼으며 암호학적 서명 문서가 아니므로, 쓰기 권한이 없는 경로에서 운영해야 합니다.
 
+## KRX 공식 시장운영 공지 수집
+
+```bash
+uv run kr-stock-wiki collect-market-notices \
+  --begin 2026-07-01 \
+  --end 2026-07-20 \
+  --output build/evidence/krx-market-notices-2026-07-20.json
+```
+
+collector는 KRX Data Marketplace의 공식 화면 `https://data.krx.co.kr/contents/MMC/NOTI/noti/MMCNOTI001.cmd`가 사용하는 공개 JSON POST 계약을 사용합니다. `mktId=ALL`, 기간 검색, page size 100으로 조회하고 `TOTAL_COUNT`, `CUR_PAGE`, `ROW_NUMBER`, 공지 ID, 게시일을 대조해 모든 페이지를 완주한 경우에만 snapshot을 발행합니다. exact HTTPS URL, redirect 차단, 페이지당 2 MiB 상한, 최대 367일·100,000건·1,000페이지 안전 한계를 적용하며 raw 원문 필드를 보존합니다. 긴 범위는 요청 수가 많으므로 짧은 rolling window 수집을 권장합니다.
+
+이 공지는 휴장·수능일 지연개장·연말/연초 거래시간 변경 같은 **예외를 탐지해 분석을 거부하거나 연기하는 veto evidence**입니다. 매일 정상 운영을 선언하는 heartbeat가 아니며, 공지 부재·검색 결과 없음은 정상개장 positive evidence가 아닙니다. 시장 메타데이터가 실제 적용 시장과 일치하지 않는 사례가 있고 NXT도 포함하지 않으므로, 이 snapshot만으로 pre-market gate를 열지 않습니다. 현재 collector는 목록과 provenance를 보존할 뿐 본문 적용일·정정 관계·적용 시장을 자동 판정하지 않습니다.
+
 ## KRX KIND 투자유의 상태 수집
 
 분석일 당일의 각 후보를 대상으로 KIND 공식 관리종목·매매거래정지 현재 목록과 최근 3년 투자경고·투자위험 지정/해제 이력을 조회합니다. 별도 인증키가 필요하지 않습니다.

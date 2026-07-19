@@ -15,6 +15,7 @@ from .collectors.calendar import KrxCalendarClient
 from .collectors.dart import DartClient
 from .collectors.kind import KindClient
 from .collectors.krx import KrxClient, KrxDailySnapshot
+from .collectors.market_notices import KrxMarketNoticeClient
 from .collectors.news import NewsFeed, YonhapRssClient
 from .collectors.nxt import NxtClient
 from .evidence import EvidenceRecord
@@ -257,6 +258,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     calendar.add_argument("--year", required=True, type=int)
     calendar.add_argument("--output", required=True, type=Path)
+    notices = commands.add_parser(
+        "collect-market-notices",
+        help="KRX 공식 시장운영 공지 목록을 완전한 JSON 스냅샷으로 수집합니다",
+    )
+    notices.add_argument("--begin", required=True, type=date.fromisoformat)
+    notices.add_argument("--end", required=True, type=date.fromisoformat)
+    notices.add_argument("--output", required=True, type=Path)
     kind = commands.add_parser(
         "collect-kind", help="KRX KIND 공식 관리·정지·투자경고 상태를 수집합니다"
     )
@@ -310,6 +318,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"입력 오류: {error}", file=sys.stderr)
             return 2
         print(f"generated={len(result.reports)} index={result.index_path}")
+        return 0
+    if args.command == "collect-market-notices":
+        try:
+            snapshot = KrxMarketNoticeClient().notices(args.begin, args.end)
+            _write_json_atomic(args.output, snapshot.to_payload())
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            print(f"KRX 시장운영 공지 수집 오류: {error}", file=sys.stderr)
+            return 2
+        print(f"collected={snapshot.total_count} output={args.output}")
         return 0
     if args.command == "collect-calendar":
         try:

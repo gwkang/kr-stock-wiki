@@ -14,6 +14,10 @@ from kr_stock_wiki.collectors.calendar import (
     KrxMarketCalendar,
     MarketHoliday,
 )
+from kr_stock_wiki.collectors.market_notices import (
+    KrxMarketNotice,
+    KrxMarketNoticeSnapshot,
+)
 from kr_stock_wiki.collectors.krx import KrxDailySnapshot, KrxMarket
 from kr_stock_wiki.evidence import EvidenceRecord, EvidenceSource, VerificationStatus
 
@@ -628,6 +632,93 @@ def test_collect_calendar_writes_official_snapshot(tmp_path: Path, monkeypatch):
     assert code == 0
     assert json.loads(output.read_text(encoding="utf-8")) == snapshot.to_payload()
     assert snapshot.source_url == CALENDAR_SOURCE_URL
+
+
+def test_collect_market_notices_writes_complete_snapshot(tmp_path: Path, monkeypatch):
+    fetched_at = datetime(2026, 7, 20, 7, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+    raw = {
+        "CUR_PAGE": "1",
+        "ROW_NUMBER": "1",
+        "TOTAL_COUNT": "1",
+        "MKT_NM": "파생상품",
+        "TITLE": "거래시간 변경 안내",
+        "DEP_NM": "시장운영팀",
+        "ATTACH_FILE_INFO": "",
+        "REG_DT": "2026-07-18",
+        "CM_BBS_ID": "0000",
+        "BBS_SEQ": "20260718000103",
+        "CONTN_TP_CD": "DRV",
+    }
+    snapshot = KrxMarketNoticeSnapshot(
+        begin=date(2026, 7, 1),
+        end=date(2026, 7, 20),
+        fetched_at=fetched_at,
+        total_count=1,
+        completed_pages=1,
+        page_size=100,
+        notices=(
+            KrxMarketNotice(
+                row_number=1,
+                notice_id=raw["BBS_SEQ"],
+                registered_date=date(2026, 7, 18),
+                market_name=raw["MKT_NM"],
+                title=raw["TITLE"],
+                department=raw["DEP_NM"],
+                content_type=raw["CONTN_TP_CD"],
+                board_id=raw["CM_BBS_ID"],
+                attachment_info=raw["ATTACH_FILE_INFO"],
+                _raw=tuple(raw.items()),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "kr_stock_wiki.cli.KrxMarketNoticeClient.notices",
+        lambda _client, begin, end: (
+            snapshot if (begin, end) == (date(2026, 7, 1), date(2026, 7, 20)) else None
+        ),
+    )
+    output = tmp_path / "market-notices.json"
+
+    code = main(
+        [
+            "collect-market-notices",
+            "--begin",
+            "2026-07-01",
+            "--end",
+            "2026-07-20",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert code == 0
+    assert json.loads(output.read_text(encoding="utf-8")) == snapshot.to_payload()
+
+
+def test_collect_market_notices_failure_preserves_existing_snapshot(
+    tmp_path: Path, monkeypatch
+):
+    output = tmp_path / "market-notices.json"
+    output.write_text("trusted-previous-snapshot", encoding="utf-8")
+
+    def fail(*_args):
+        raise ValueError("partial upstream response")
+
+    monkeypatch.setattr("kr_stock_wiki.cli.KrxMarketNoticeClient.notices", fail)
+    code = main(
+        [
+            "collect-market-notices",
+            "--begin",
+            "2026-07-01",
+            "--end",
+            "2026-07-20",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert code == 2
+    assert output.read_text(encoding="utf-8") == "trusted-previous-snapshot"
 
 
 def test_cli_run_fails_closed_without_official_same_day_operating_status(
