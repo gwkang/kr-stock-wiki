@@ -15,6 +15,7 @@
 - 실제 GitHub Wiki 저장소에 복사할 동기화 엔진
 - 공식 OpenDART 공시검색·KRX 일별 시세·NXT 20분 지연 시세 및 세션 집계·연합뉴스 RSS 수집기와 공통 근거 데이터 계약
 - CLI, pytest, GitHub Actions CI
+- 평일 20:45 KST 공식 post-market snapshot 수집, 후보 생성, `wiki/` 커밋 및 GitHub Wiki 자동 배포
 
 OpenDART·KRX·NXT·연합뉴스 RSS·KRX KIND 투자유의 상태 수집기가 구현됐습니다. OpenDART와 KRX는 각 API 키를 연결하면 공식 공시 및 KOSPI·KOSDAQ 일별 시세 스냅샷을 생성하며, NXT·연합뉴스 RSS·KIND는 별도 인증 없이 공식 웹사이트에서 각각 시세·세션 집계, 경제·산업·마켓 기사, 관리종목·거래정지·투자경고/위험 상태를 수집합니다. 투자자별 수급 수집기는 아직 연결되지 않았습니다. 샘플 신호는 입력 구조와 테스트 검증용으로만 사용하며 실제 최신 후보로 게시하지 않습니다.
 
@@ -178,12 +179,33 @@ uv run kr-stock-wiki collect-news \
 
 모든 신호에는 원문 `source_url`과 관측 시각이 필요합니다.
 
+## 일일 post-market 자동 리포트
+
+`.github/workflows/daily-report.yml`은 평일 `11:45 UTC`(20:45 KST)에 실행됩니다. GitHub Actions schedule은 부하에 따라 지연될 수 있습니다. `config/watchlist.json`에 명시된 1~20개 종목만 분석하며, 종목명은 공식 KRX 응답과 정확히 일치해야 합니다. 현재 기본 관심종목은 삼성전자(`005930`) 1개입니다.
+
+운영 전 저장소의 **Settings → Secrets and variables → Actions**에 `KRX_API_KEY` secret을 등록해야 합니다. 키는 명령행·snapshot·로그·Wiki에 기록하지 않습니다. secret이 없거나 공식 수집·검증 단계가 하나라도 실패하면 리포트와 Wiki를 갱신하지 않습니다.
+
+실행 순서:
+
+1. Global KRX 연간 calendar를 검증하고 예정 휴장일·주말이면 정상 종료
+2. 같은 KST 기준일의 KOSPI·KOSDAQ 전체 KRX snapshot 수집
+3. NXT 프리·메인·애프터마켓 세션 합계와 `source_as_of ≥ 20:20 KST`인 종목별 20분 지연 snapshot 수집
+4. KRX `price-volume`과 NXT `cross-market`을 독립 공식 근거로 변환하고, 리포트 직전에 동일 watchlist·KRX·NXT snapshot에서 다시 계산해 후보 artifact 전체와 정확히 대조
+5. 모든 관심종목의 KIND 관리·정지·투자경고 상태를 당일 조회
+6. 운영 필터와 후보 ranker를 통과한 최대 5개 리포트를 `wiki/`에 생성
+7. Wiki lint 성공 후에만 main의 `wiki/`를 커밋하고, exact main commit SHA를 단일 직렬 Wiki 배포 workflow에 전달해 GitHub Wiki 탭에 동기화
+8. raw official snapshot은 저장소에 커밋하지 않고 Actions artifact로 30일 보존
+
+신호 점수는 각 시장의 공식 등락률 절댓값에 10을 곱해 0~100으로 제한하는 결정론적 값입니다. ranker에서 KRX 그룹은 최대 20점, NXT 그룹은 최대 10점으로 제한됩니다. NXT 거래대상이 아니거나 quote가 없는 종목은 KRX 신호만 남으므로 독립 그룹·근거 2개 조건을 통과하지 않습니다. 거래일은 최종 KRX 양시장 완전 snapshot으로 다시 확인하고, 유동성 하한과 KIND 위험 상태를 모두 통과한 경우에만 게시합니다. 적격 종목이 없으면 억지로 채우지 않고 후보 없음으로 게시합니다.
+
+현재 자동 리포트는 **공식 가격·거래량·거래대금과 운영 위험에 기반한 결정론적 1차 버전**입니다. OpenDART 공시·연합뉴스 기사·공식 투자자별 수급을 자동 후보 신호로 결합하는 adapter와 실제 LLM 역할 실행은 아직 연결되지 않았습니다. 07:30 pre-market은 KRX와 NXT의 당일 정상운영 positive evidence를 확보할 때까지 계속 fail-closed입니다.
+
+수동 재실행은 Actions의 `Daily Post-Market Research`에서 가능하지만 builder가 20:20 KST 이전 실행을 거부합니다.
+
 ## 예정 운영 시각
 
-- 07:30 KST: NXT 프리마켓 전
-- 20:30 KST: NXT 애프터마켓 종료 후
-
-실시간 수집기와 GitHub 인증이 연결되기 전에는 예약 배포를 활성화하지 않습니다.
+- 07:30 KST: **비활성** — KRX·NXT 당일 정상운영 positive evidence 필요
+- 20:45 KST: **활성** — NXT 20분 지연 애프터마켓 snapshot 반영
 
 ## 면책
 

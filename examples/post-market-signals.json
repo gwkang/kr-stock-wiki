@@ -1,4 +1,6 @@
 {
+  "schema_version": 1,
+  "source": "manual-research-input",
   "as_of": "2026-07-20T20:30:00+09:00",
   "business_date": "2026-07-20",
   "mode": "post-market",

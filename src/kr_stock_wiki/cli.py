@@ -19,6 +19,7 @@ from .collectors.krx import KrxClient, KrxDailySnapshot
 from .collectors.market_notices import KrxMarketNoticeClient
 from .collectors.news import NewsFeed, YonhapRssClient
 from .collectors.nxt import NxtClient
+from .daily import build_post_market_input
 from .evidence import EvidenceRecord
 from .harness import ResearchHarness
 from .market_rules import (
@@ -42,8 +43,28 @@ def _number(value: Any, field: str) -> float:
     return number
 
 
-def _load_candidates(path: Path) -> tuple[datetime, date, str, list[Candidate]]:
+def _load_candidates(
+    path: Path,
+) -> tuple[datetime, date, str, str, list[Candidate]]:
     data = json.loads(path.read_text(encoding="utf-8"))
+    envelope_fields = {
+        "schema_version",
+        "source",
+        "as_of",
+        "business_date",
+        "mode",
+        "candidates",
+    }
+    allowed_sources = {"manual-research-input", "official-post-market-builder"}
+    if (
+        not isinstance(data, dict)
+        or set(data) != envelope_fields
+        or data.get("schema_version") != 1
+        or data.get("source") not in allowed_sources
+        or not isinstance(data.get("candidates"), list)
+    ):
+        raise ValueError("invalid candidate input envelope")
+    source = data["source"]
     observed = datetime.fromisoformat(data["as_of"])
     business_date = date.fromisoformat(data["business_date"])
     if observed.tzinfo is None or observed.utcoffset() is None:
@@ -58,17 +79,46 @@ def _load_candidates(path: Path) -> tuple[datetime, date, str, list[Candidate]]:
         raise ValueError("pre-market business_date must precede the KST analysis date")
     candidates = []
     for item in data["candidates"]:
-        signals = [
-            Signal(
-                SignalGroup(signal["group"]),
-                _number(signal["score"], "signal.score"),
-                signal["reason"],
-                signal["source_url"],
-                datetime.fromisoformat(signal.get("observed_at", data["as_of"])),
-                evidence_id=signal.get("evidence_id"),
+        if (
+            not isinstance(item, dict)
+            or not {"ticker", "name", "signals"} <= set(item)
+            or not set(item)
+            <= {
+                "ticker",
+                "name",
+                "signals",
+                "risk_penalty",
+                "hard_exclusion",
+            }
+            or not isinstance(item.get("signals"), list)
+        ):
+            raise ValueError("invalid candidate record schema")
+        signals = []
+        for signal in item["signals"]:
+            if (
+                not isinstance(signal, dict)
+                or not {"group", "score", "reason", "source_url"} <= set(signal)
+                or not set(signal)
+                <= {
+                    "group",
+                    "score",
+                    "reason",
+                    "source_url",
+                    "observed_at",
+                    "evidence_id",
+                }
+            ):
+                raise ValueError("invalid candidate signal schema")
+            signals.append(
+                Signal(
+                    SignalGroup(signal["group"]),
+                    _number(signal["score"], "signal.score"),
+                    signal["reason"],
+                    signal["source_url"],
+                    datetime.fromisoformat(signal.get("observed_at", data["as_of"])),
+                    evidence_id=signal.get("evidence_id"),
+                )
             )
-            for signal in item["signals"]
-        ]
         candidates.append(
             Candidate(
                 ticker=item["ticker"],
@@ -78,7 +128,7 @@ def _load_candidates(path: Path) -> tuple[datetime, date, str, list[Candidate]]:
                 hard_exclusion=item.get("hard_exclusion"),
             )
         )
-    return observed, business_date, mode, candidates
+    return observed, business_date, mode, source, candidates
 
 
 def _load_krx_snapshot(path: Path) -> KrxDailySnapshot:
@@ -86,6 +136,22 @@ def _load_krx_snapshot(path: Path) -> KrxDailySnapshot:
     if not isinstance(payload, dict):
         raise ValueError("KRX snapshot must be a JSON object")
     return KrxDailySnapshot.from_payload(payload)
+
+
+def _verify_official_candidate_input(
+    candidate_path: Path,
+    *,
+    watchlist_path: Path,
+    nxt_snapshot_path: Path,
+    krx_snapshot: KrxDailySnapshot,
+    observed: datetime,
+) -> None:
+    actual = json.loads(candidate_path.read_text(encoding="utf-8"))
+    watchlist = json.loads(watchlist_path.read_text(encoding="utf-8"))
+    nxt_snapshot = json.loads(nxt_snapshot_path.read_text(encoding="utf-8"))
+    expected = build_post_market_input(watchlist, krx_snapshot, nxt_snapshot, observed)
+    if actual != expected:
+        raise ValueError("official candidate input does not match source snapshots")
 
 
 def _load_listing_risks(
@@ -238,8 +304,19 @@ def build_parser() -> argparse.ArgumentParser:
     run = commands.add_parser("run", help="JSON 신호 입력으로 Wiki 리포트를 생성합니다")
     run.add_argument("--input", required=True, type=Path)
     run.add_argument("--krx-snapshot", required=True, type=Path)
+    run.add_argument("--watchlist", type=Path)
+    run.add_argument("--nxt-snapshot", type=Path)
     run.add_argument("--kind-status", required=True, type=Path)
     run.add_argument("--output", required=True, type=Path)
+    daily = commands.add_parser(
+        "build-daily-input",
+        help="공식 KRX·NXT snapshot에서 post-market 후보 입력을 생성합니다",
+    )
+    daily.add_argument("--watchlist", required=True, type=Path)
+    daily.add_argument("--krx-snapshot", required=True, type=Path)
+    daily.add_argument("--nxt-snapshot", required=True, type=Path)
+    daily.add_argument("--as-of", required=True, type=datetime.fromisoformat)
+    daily.add_argument("--output", required=True, type=Path)
     lint = commands.add_parser("lint", help="Wiki 무결성을 검사합니다")
     lint.add_argument("--wiki", required=True, type=Path)
     dart = commands.add_parser(
@@ -294,14 +371,56 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "build-daily-input":
+        try:
+            watchlist = json.loads(args.watchlist.read_text(encoding="utf-8"))
+            krx_snapshot = _load_krx_snapshot(args.krx_snapshot)
+            nxt_snapshot = json.loads(args.nxt_snapshot.read_text(encoding="utf-8"))
+            payload = build_post_market_input(
+                watchlist, krx_snapshot, nxt_snapshot, args.as_of
+            )
+            _write_json_atomic(args.output, payload)
+        except (
+            OSError,
+            ValueError,
+            KeyError,
+            TypeError,
+            json.JSONDecodeError,
+        ) as error:
+            print(f"일일 후보 입력 생성 오류: {error}", file=sys.stderr)
+            return 2
+        print(f"candidates={len(payload['candidates'])} output={args.output}")
+        return 0
     if args.command == "run":
         try:
-            observed, business_date, mode, candidates = _load_candidates(args.input)
+            observed, business_date, mode, source, candidates = _load_candidates(
+                args.input
+            )
             if mode == "pre-market":
                 raise ValueError(
                     "pre-market 실행에는 캘린더 외에 공식 KRX 당일 운영상태 근거가 필요합니다"
                 )
             krx_snapshot = _load_krx_snapshot(args.krx_snapshot)
+            has_watchlist = args.watchlist is not None
+            has_nxt_snapshot = args.nxt_snapshot is not None
+            if has_watchlist != has_nxt_snapshot:
+                raise ValueError("watchlist and NXT snapshot must be provided together")
+            if has_watchlist:
+                if source != "official-post-market-builder":
+                    raise ValueError(
+                        "source snapshots require official candidate input"
+                    )
+                _verify_official_candidate_input(
+                    args.input,
+                    watchlist_path=args.watchlist,
+                    nxt_snapshot_path=args.nxt_snapshot,
+                    krx_snapshot=krx_snapshot,
+                    observed=observed,
+                )
+            elif source == "official-post-market-builder":
+                raise ValueError(
+                    "official candidate input requires watchlist and NXT snapshot"
+                )
             listing_risks = _load_listing_risks(
                 args.kind_status,
                 analysis_time=observed,

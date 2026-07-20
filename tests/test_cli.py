@@ -3,10 +3,14 @@ from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from kr_stock_wiki.cli import (
+    _load_candidates,
     _load_krx_snapshot,
     _load_listing_risks,
     _operational_evidence,
+    _verify_official_candidate_input,
     main,
 )
 from kr_stock_wiki.collectors.calendar import (
@@ -120,8 +124,6 @@ def write_operational_snapshots(
 
 
 def test_operational_snapshots_reject_lookahead_timestamps(tmp_path: Path):
-    import pytest
-
     business_date = date(2026, 7, 20)
     observed = datetime(2026, 7, 20, 20, 30, tzinfo=ZoneInfo("Asia/Seoul"))
     krx_path, kind_path = write_operational_snapshots(
@@ -157,11 +159,36 @@ def test_operational_snapshots_reject_lookahead_timestamps(tmp_path: Path):
         )
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("schema_version", 999), ("source", "tampered")],
+)
+def test_candidate_loader_rejects_untrusted_envelope(
+    tmp_path: Path, field: str, value: object
+):
+    payload = {
+        "schema_version": 1,
+        "source": "manual-research-input",
+        "as_of": "2026-07-20T20:30:00+09:00",
+        "business_date": "2026-07-20",
+        "mode": "post-market",
+        "candidates": [],
+    }
+    payload[field] = value
+    source = tmp_path / "signals.json"
+    source.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="candidate input envelope"):
+        _load_candidates(source)
+
+
 def test_cli_run_generates_wiki_from_json(tmp_path: Path):
     source = tmp_path / "signals.json"
     source.write_text(
         json.dumps(
             {
+                "schema_version": 1,
+                "source": "manual-research-input",
                 "as_of": "2026-07-20T20:30:00+09:00",
                 "business_date": "2026-07-20",
                 "mode": "post-market",
@@ -810,6 +837,8 @@ def test_cli_run_fails_closed_without_official_same_day_operating_status(
     source.write_text(
         json.dumps(
             {
+                "schema_version": 1,
+                "source": "manual-research-input",
                 "as_of": "2026-07-20T07:30:00+09:00",
                 "business_date": "2026-07-17",
                 "mode": "pre-market",
@@ -842,3 +871,159 @@ def test_cli_lint_returns_nonzero_for_invalid_wiki(tmp_path: Path):
     (tmp_path / "Bad.md").write_text("# no metadata", encoding="utf-8")
 
     assert main(["lint", "--wiki", str(tmp_path)]) == 1
+
+
+def test_build_daily_input_writes_official_post_market_candidates(tmp_path: Path):
+    krx_path, _kind_path = write_operational_snapshots(
+        tmp_path,
+        business_date=date(2026, 7, 20),
+        analysis_date=date(2026, 7, 20),
+    )
+    krx_payload = json.loads(krx_path.read_text(encoding="utf-8"))
+    krx_payload["records"][0]["metrics"]["change_rate"] = 2.5
+    krx_path.write_text(json.dumps(krx_payload), encoding="utf-8")
+    watchlist = tmp_path / "watchlist.json"
+    watchlist.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source": "user-watchlist",
+                "stocks": [{"ticker": "005930", "name": "005930"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    nxt = tmp_path / "nxt.json"
+    nxt_quote = EvidenceRecord(
+        source=EvidenceSource.NXT,
+        evidence_id="nxt:price-snapshot:20260720:005930",
+        canonical_event_id="nxt:price-snapshot:20260720:005930",
+        kind="price-snapshot",
+        ticker="005930",
+        company_name="005930",
+        title="005930 NXT 20분 지연 시세",
+        source_url="https://www.nextrade.co.kr/menu/transactionStatusMain/menuList.do",
+        published_date=date(2026, 7, 20),
+        fetched_at=datetime(2026, 7, 20, 20, 29, tzinfo=ZoneInfo("Asia/Seoul")),
+        verification=VerificationStatus.OFFICIAL,
+        delay_minutes=20,
+        metrics={
+            "current_price": 72000,
+            "change_rate": 2.0,
+            "volume": 2000000,
+            "trading_value": 144000000000,
+            "source_as_of": "2026-07-20T20:20:00+09:00",
+        },
+    )
+    nxt_summary = EvidenceRecord(
+        source=EvidenceSource.NXT,
+        evidence_id="nxt:session-summary:20260720",
+        canonical_event_id="nxt:session-summary:20260720",
+        kind="session-summary",
+        company_name="NEXTRADE",
+        title="NXT 2026-07-20 세션별 거래 현황",
+        source_url="https://www.nextrade.co.kr/menu/transactionStatusDaily/menuList.do",
+        published_date=date(2026, 7, 20),
+        fetched_at=datetime(2026, 7, 20, 20, 30, tzinfo=ZoneInfo("Asia/Seoul")),
+        verification=VerificationStatus.OFFICIAL,
+        metrics={
+            "pre_session": "08:00-08:50",
+            "pre_instruments": 100,
+            "pre_volume": 10,
+            "pre_trading_value": 100,
+            "main_session": "09:00:30-15:20",
+            "main_instruments": 200,
+            "main_volume": 20,
+            "main_trading_value": 200,
+            "after_session": "15:40-20:00",
+            "after_instruments": 150,
+            "after_volume": 30,
+            "after_trading_value": 300,
+            "total_instruments": 250,
+            "total_volume": 60,
+            "total_trading_value": 600,
+            "volume_market_share": 12.3,
+        },
+    )
+    nxt.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source": "nxt",
+                "collected_at": "2026-07-20T20:30:00+09:00",
+                "date": "2026-07-20",
+                "quote_delay_minutes": 20,
+                "records": [nxt_quote.to_dict(), nxt_summary.to_dict()],
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "daily-input.json"
+
+    code = main(
+        [
+            "build-daily-input",
+            "--watchlist",
+            str(watchlist),
+            "--krx-snapshot",
+            str(krx_path),
+            "--nxt-snapshot",
+            str(nxt),
+            "--as-of",
+            "2026-07-20T20:45:00+09:00",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert code == 0
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["source"] == "official-post-market-builder"
+    assert payload["candidates"][0]["ticker"] == "005930"
+    assert payload["candidates"][0]["signals"][0]["score"] == 25.0
+    _verify_official_candidate_input(
+        output,
+        watchlist_path=watchlist,
+        nxt_snapshot_path=nxt,
+        krx_snapshot=_load_krx_snapshot(krx_path),
+        observed=datetime(2026, 7, 20, 20, 45, tzinfo=ZoneInfo("Asia/Seoul")),
+    )
+
+    payload["candidates"][0]["signals"][0]["score"] = 100
+    output.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="does not match source snapshots"):
+        _verify_official_candidate_input(
+            output,
+            watchlist_path=watchlist,
+            nxt_snapshot_path=nxt,
+            krx_snapshot=_load_krx_snapshot(krx_path),
+            observed=datetime(2026, 7, 20, 20, 45, tzinfo=ZoneInfo("Asia/Seoul")),
+        )
+
+
+def test_build_daily_input_preserves_existing_output_on_validation_failure(
+    tmp_path: Path,
+):
+    output = tmp_path / "daily-input.json"
+    output.write_text('{"preserved": true}\n', encoding="utf-8")
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text("{}", encoding="utf-8")
+
+    code = main(
+        [
+            "build-daily-input",
+            "--watchlist",
+            str(invalid),
+            "--krx-snapshot",
+            str(invalid),
+            "--nxt-snapshot",
+            str(invalid),
+            "--as-of",
+            "2026-07-20T20:45:00+09:00",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert code == 2
+    assert json.loads(output.read_text(encoding="utf-8")) == {"preserved": True}

@@ -1,0 +1,166 @@
+name: Daily Post-Market Research
+
+on:
+  schedule:
+    - cron: "45 11 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: daily-post-market-research
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: true
+          python-version: "3.13.5"
+      - run: uv sync --locked
+      - name: Resolve current KST business date
+        id: clock
+        run: |
+          echo "business_date=$(TZ=Asia/Seoul date +%F)" >> "$GITHUB_OUTPUT"
+      - name: Collect official KRX annual calendar
+        run: |
+          mkdir -p build/evidence
+          uv run kr-stock-wiki collect-calendar \
+            --year "$(TZ=Asia/Seoul date +%Y)" \
+            --output build/evidence/calendar.json
+      - name: Check scheduled-open date
+        id: scheduled_open
+        env:
+          BUSINESS_DATE: ${{ steps.clock.outputs.business_date }}
+        run: |
+          weekday=$(TZ=Asia/Seoul date -d "$BUSINESS_DATE" +%u)
+          if [ "$weekday" -gt 5 ] || \
+             jq -e --arg day "$BUSINESS_DATE" \
+               '.holidays | any(.date == $day)' \
+               build/evidence/calendar.json >/dev/null; then
+            echo "open=false" >> "$GITHUB_OUTPUT"
+            echo "scheduled KRX closure: $BUSINESS_DATE"
+          else
+            echo "open=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Collect complete official KRX daily snapshot
+        if: steps.scheduled_open.outputs.open == 'true'
+        env:
+          BUSINESS_DATE: ${{ steps.clock.outputs.business_date }}
+          KRX_API_KEY: ${{ secrets.KRX_API_KEY }}
+        run: |
+          uv run kr-stock-wiki collect-krx \
+            --date "$BUSINESS_DATE" \
+            --output build/evidence/krx.json
+      - name: Collect complete official NXT delayed snapshot
+        if: steps.scheduled_open.outputs.open == 'true'
+        env:
+          BUSINESS_DATE: ${{ steps.clock.outputs.business_date }}
+        run: |
+          uv run kr-stock-wiki collect-nxt \
+            --date "$BUSINESS_DATE" \
+            --output build/evidence/nxt.json
+      - name: Resolve discovery timestamp
+        if: steps.scheduled_open.outputs.open == 'true'
+        id: discovery_clock
+        run: |
+          echo "as_of=$(TZ=Asia/Seoul date '+%Y-%m-%dT%H:%M:%S.%6N%:z')" >> "$GITHUB_OUTPUT"
+      - name: Build provisional official candidate input
+        if: steps.scheduled_open.outputs.open == 'true'
+        env:
+          AS_OF: ${{ steps.discovery_clock.outputs.as_of }}
+        run: |
+          uv run kr-stock-wiki build-daily-input \
+            --watchlist config/watchlist.json \
+            --krx-snapshot build/evidence/krx.json \
+            --nxt-snapshot build/evidence/nxt.json \
+            --as-of "$AS_OF" \
+            --output build/evidence/candidates.json
+      - name: Collect complete KIND risk status for every candidate
+        if: steps.scheduled_open.outputs.open == 'true'
+        env:
+          BUSINESS_DATE: ${{ steps.clock.outputs.business_date }}
+        run: |
+          args=()
+          while IFS= read -r ticker; do
+            args+=(--ticker "$ticker")
+          done < <(jq -r '.candidates[].ticker' build/evidence/candidates.json)
+          test "${#args[@]}" -gt 0
+          uv run kr-stock-wiki collect-kind \
+            --date "$BUSINESS_DATE" \
+            "${args[@]}" \
+            --output build/evidence/kind.json
+      - name: Resolve final analysis timestamp
+        if: steps.scheduled_open.outputs.open == 'true'
+        id: analysis_clock
+        run: |
+          echo "as_of=$(TZ=Asia/Seoul date '+%Y-%m-%dT%H:%M:%S.%6N%:z')" >> "$GITHUB_OUTPUT"
+      - name: Rebuild official candidate input at final analysis time
+        if: steps.scheduled_open.outputs.open == 'true'
+        env:
+          AS_OF: ${{ steps.analysis_clock.outputs.as_of }}
+        run: |
+          uv run kr-stock-wiki build-daily-input \
+            --watchlist config/watchlist.json \
+            --krx-snapshot build/evidence/krx.json \
+            --nxt-snapshot build/evidence/nxt.json \
+            --as-of "$AS_OF" \
+            --output build/evidence/candidates.json
+      - name: Generate fail-closed post-market Wiki report
+        if: steps.scheduled_open.outputs.open == 'true'
+        run: |
+          uv run kr-stock-wiki run \
+            --input build/evidence/candidates.json \
+            --watchlist config/watchlist.json \
+            --krx-snapshot build/evidence/krx.json \
+            --nxt-snapshot build/evidence/nxt.json \
+            --kind-status build/evidence/kind.json \
+            --output wiki
+          uv run kr-stock-wiki lint --wiki wiki
+      - name: Preserve official-snapshots audit artifact
+        if: always() && steps.scheduled_open.outputs.open == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: official-snapshots-${{ steps.clock.outputs.business_date }}
+          path: build/evidence/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Commit validated Wiki source
+        if: steps.scheduled_open.outputs.open == 'true'
+        id: source_commit
+        env:
+          BUSINESS_DATE: ${{ steps.clock.outputs.business_date }}
+        run: |
+          git fetch origin main
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- wiki
+          if ! git diff --cached --quiet; then
+            git commit -m "docs: publish $BUSINESS_DATE post-market research"
+            git push origin HEAD:main
+          fi
+          echo "source_ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Dispatch serialized GitHub Wiki publication
+        if: steps.scheduled_open.outputs.open == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REF: ${{ steps.source_commit.outputs.source_ref }}
+        run: |
+          payload=$(jq -nc --arg source_ref "$SOURCE_REF" \
+            '{ref:"main",inputs:{source_ref:$source_ref}}')
+          curl --fail --silent --show-error \
+            --request POST \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/workflows/wiki-sync.yml/dispatches" \
+            --data "$payload"

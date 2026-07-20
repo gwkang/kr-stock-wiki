@@ -1,7 +1,15 @@
 name: Publish GitHub Wiki
 
 on:
+  push:
+    branches: [main]
+    paths: ["wiki/**"]
   workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Exact validated main commit SHA to publish
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -13,8 +21,19 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - name: Pin validated source commit
+        env:
+          REQUESTED_REF: ${{ inputs.source_ref || github.sha }}
+        run: |
+          [[ "$REQUESTED_REF" =~ ^[0-9a-f]{40}$ ]]
+          git fetch origin main
+          git merge-base --is-ancestor "$REQUESTED_REF" origin/main
+          git checkout --detach "$REQUESTED_REF"
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           python-version: "3.13.5"
