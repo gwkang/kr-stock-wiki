@@ -79,6 +79,7 @@ def write_operational_snapshots(
             source_url=(
                 "https://data-dbg.krx.co.kr/svc/apis/sto/"
                 + ("stk_bydd_trd" if market is KrxMarket.KOSPI else "ksq_bydd_trd")
+                + f"?basDd={business_date:%Y%m%d}"
             ),
             published_date=business_date,
             fetched_at=fetched_at,
@@ -118,7 +119,10 @@ def write_operational_snapshots(
         kind="listing-risk-status",
         company_name="삼성전자",
         title="KRX KIND 투자유의 상태",
-        source_url="https://kind.krx.co.kr/investwarn/adminissue.do",
+        source_url=(
+            "https://kind.krx.co.kr/investwarn/adminissue.do"
+            "?method=searchAdminIssueList"
+        ),
         published_date=analysis_date,
         fetched_at=fetched_at,
         verification=VerificationStatus.OFFICIAL,
@@ -204,6 +208,45 @@ def test_candidate_loader_rejects_untrusted_envelope(
     source.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="candidate input envelope"):
+        _load_candidates(source)
+
+
+@pytest.mark.parametrize("missing_field", ["observed_at", "evidence_id"])
+def test_candidate_loader_rejects_official_pre_market_signal_without_provenance(
+    tmp_path: Path, missing_field: str
+):
+    signal = {
+        "group": "price-volume",
+        "score": 25,
+        "reason": "전 거래일 KRX",
+        "source_url": "https://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_trd",
+        "observed_at": "2026-07-20T20:45:00+09:00",
+        "evidence_id": "krx:daily:KOSPI:20260720:005930",
+    }
+    signal.pop(missing_field)
+    source = tmp_path / "signals.json"
+    source.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source": "official-pre-market-builder",
+                "as_of": "2026-07-21T07:30:00+09:00",
+                "business_date": "2026-07-21",
+                "mode": "pre-market",
+                "candidates": [
+                    {
+                        "ticker": "005930",
+                        "name": "삼성전자",
+                        "risk_penalty": 0,
+                        "signals": [signal],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="candidate signal schema"):
         _load_candidates(source)
 
 
@@ -1300,6 +1343,7 @@ def test_build_pre_market_input_cli_writes_previous_session_artifact(tmp_path: P
     kind_payload = json.loads(kind_path.read_text(encoding="utf-8"))
     kind_payload["collected_at"] = observed.isoformat()
     kind_payload["records"][0]["fetched_at"] = observed.isoformat()
+    kind_payload["records"][0]["company_name"] = "005930"
     kind_path.write_text(json.dumps(kind_payload), encoding="utf-8")
     krx_payload = json.loads(krx_path.read_text(encoding="utf-8"))
     krx_payload["records"][0]["metrics"]["change_rate"] = 2.5

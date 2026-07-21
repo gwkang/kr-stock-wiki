@@ -429,27 +429,28 @@ def build_pre_market_input(
             }
         ]
         nxt = quotes.get(ticker)
-        if nxt is not None:
-            if nxt.company_name != krx.company_name:
-                raise ValueError(f"KRX/NXT company name mismatch for {ticker}")
-            nxt_change_rate = _finite_number(
-                nxt.metrics.get("change_rate"), "NXT change_rate"
-            )
-            nxt_volume = _integer_metric(nxt, "volume")
-            nxt_trading_value = _integer_metric(nxt, "trading_value")
-            signals.append(
-                {
-                    "group": "cross-market",
-                    "score": _score(nxt_change_rate, "NXT change_rate"),
-                    "reason": (
-                        f"전 거래일 NXT 20분 지연 등락률 {nxt_change_rate:+.2f}%, "
-                        f"거래량 {nxt_volume:,}주, 거래대금 {nxt_trading_value:,}원"
-                    ),
-                    "source_url": nxt.source_url,
-                    "observed_at": nxt.fetched_at.isoformat(),
-                    "evidence_id": nxt.evidence_id,
-                }
-            )
+        if nxt is None:
+            raise ValueError(f"watchlist ticker {ticker} is missing from NXT snapshot")
+        if nxt.company_name != krx.company_name:
+            raise ValueError(f"KRX/NXT company name mismatch for {ticker}")
+        nxt_change_rate = _finite_number(
+            nxt.metrics.get("change_rate"), "NXT change_rate"
+        )
+        nxt_volume = _integer_metric(nxt, "volume")
+        nxt_trading_value = _integer_metric(nxt, "trading_value")
+        signals.append(
+            {
+                "group": "cross-market",
+                "score": _score(nxt_change_rate, "NXT change_rate"),
+                "reason": (
+                    f"전 거래일 NXT 20분 지연 등락률 {nxt_change_rate:+.2f}%, "
+                    f"거래량 {nxt_volume:,}주, 거래대금 {nxt_trading_value:,}원"
+                ),
+                "source_url": nxt.source_url,
+                "observed_at": nxt.fetched_at.isoformat(),
+                "evidence_id": nxt.evidence_id,
+            }
+        )
         candidates.append(
             {
                 "ticker": ticker,

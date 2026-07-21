@@ -202,6 +202,30 @@ def test_build_pre_market_input_uses_exact_previous_krx_and_nxt_at_0730():
     assert candidate["signals"][1]["reason"].startswith("전 거래일 NXT")
 
 
+def test_build_pre_market_input_rejects_watchlist_ticker_missing_from_nxt():
+    analysis_at = datetime(2026, 7, 21, 7, 30, tzinfo=KST)
+    other_nxt = replace(
+        price_record(
+            ticker="247540",
+            source=EvidenceSource.NXT,
+            name="에코프로비엠",
+            fetched_at=analysis_at - timedelta(minutes=1),
+        ),
+        evidence_id="nxt:price-snapshot:20260720:247540",
+        canonical_event_id="nxt:price-snapshot:20260720:247540",
+    )
+
+    with pytest.raises(ValueError, match="005930 is missing from NXT"):
+        daily.build_pre_market_input(
+            watchlist(("005930", "삼성전자")),
+            krx_snapshot(price_record()),
+            nxt_payload(other_nxt),
+            calendar_bundle(analysis_at),
+            BUSINESS_DATE,
+            analysis_at,
+        )
+
+
 def test_build_post_market_input_uses_independent_official_krx_and_nxt_signals():
     krx = price_record()
     nxt = price_record(source=EvidenceSource.NXT)

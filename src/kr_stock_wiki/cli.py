@@ -122,6 +122,10 @@ def _load_candidates(
             if (
                 not isinstance(signal, dict)
                 or not {"group", "score", "reason", "source_url"} <= set(signal)
+                or (
+                    source == "official-pre-market-builder"
+                    and not {"observed_at", "evidence_id"} <= set(signal)
+                )
                 or not set(signal)
                 <= {
                     "group",

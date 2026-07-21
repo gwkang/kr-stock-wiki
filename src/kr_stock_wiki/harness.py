@@ -43,14 +43,15 @@ def _validate_morning_krx_signal(
     price: EvidenceRecord,
     previous_business_date: date,
 ) -> None:
+    date_text = previous_business_date.strftime("%Y%m%d")
     expected_ids = {
         (
-            f"krx:daily:KOSPI:{previous_business_date:%Y%m%d}:{candidate.ticker}",
-            "https://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_trd",
+            f"krx:daily:KOSPI:{date_text}:{candidate.ticker}",
+            f"https://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_trd?basDd={date_text}",
         ),
         (
-            f"krx:daily:KOSDAQ:{previous_business_date:%Y%m%d}:{candidate.ticker}",
-            "https://data-dbg.krx.co.kr/svc/apis/sto/ksq_bydd_trd",
+            f"krx:daily:KOSDAQ:{date_text}:{candidate.ticker}",
+            f"https://data-dbg.krx.co.kr/svc/apis/sto/ksq_bydd_trd?basDd={date_text}",
         ),
     }
     change_rate = price.metrics.get("change_rate")
@@ -256,17 +257,16 @@ class ResearchHarness:
                     for signal in candidate.signals
                     if signal.group is SignalGroup.CROSS_MARKET
                 ]
-                if len(price_signals) != 1:
+                if (
+                    len(candidate.signals) != 2
+                    or len(price_signals) != 1
+                    or len(cross_signals) != 1
+                ):
                     raise ValueError(
-                        "pre-market candidates require one KRX price signal"
-                    )
-                if len(cross_signals) > 1:
-                    raise ValueError(
-                        "pre-market candidates allow at most one NXT signal"
+                        "pre-market candidates require exactly one KRX and one NXT signal"
                     )
                 price_by_ticker[candidate.ticker] = price_signals[0]
-                if cross_signals:
-                    cross_by_ticker[candidate.ticker] = cross_signals[0]
+                cross_by_ticker[candidate.ticker] = cross_signals[0]
             if set(pre_market_nxt_evidence) != set(cross_by_ticker):
                 raise ValueError(
                     "pre-market NXT evidence must match cross-market candidates"
@@ -490,6 +490,25 @@ class ResearchHarness:
                         cast(date, previous_business_date),
                     )
             risk_record = evidence.listing_risk.evidence
+            if mode == "pre-market" and risk_record is None:
+                raise ValueError("pre-market requires current KIND evidence")
+            if mode == "pre-market" and risk_record is not None:
+                expected_kind_id = (
+                    f"kind:listing-risk:{analysis_date.isoformat()}:{ticker}"
+                )
+                if (
+                    risk_record.evidence_id != expected_kind_id
+                    or risk_record.canonical_event_id != expected_kind_id
+                    or risk_record.source_url
+                    != (
+                        "https://kind.krx.co.kr/investwarn/adminissue.do"
+                        "?method=searchAdminIssueList"
+                    )
+                    or risk_record.company_name != candidate_names[ticker]
+                    or risk_record.is_correction
+                    or risk_record.is_withdrawn
+                ):
+                    raise ValueError("pre-market requires canonical KIND evidence")
             if risk_record is not None and (
                 risk_record.published_date != analysis_date
                 or risk_record.fetched_at > observed_at

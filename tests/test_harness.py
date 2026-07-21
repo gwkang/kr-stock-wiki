@@ -263,7 +263,7 @@ def test_harness_accepts_0730_pre_market_with_exact_previous_official_evidence(
     previous = date(2026, 7, 17)
     fetched = datetime(2026, 7, 17, 20, 45, tzinfo=ZoneInfo("Asia/Seoul"))
     nxt_fetched = observed - timedelta(minutes=1)
-    krx_url = "https://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_trd"
+    krx_url = "https://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_trd?basDd=20260717"
     krx_id = "krx:daily:KOSPI:20260717:005930"
     nxt_url = "https://www.nextrade.co.kr/menu/transactionStatusMain/menuList.do"
     nxt_id = "nxt:price-snapshot:20260717:005930"
@@ -320,7 +320,10 @@ def test_harness_accepts_0730_pre_market_with_exact_previous_official_evidence(
         kind="listing-risk-status",
         company_name="삼성전자",
         title="KIND 투자유의 상태",
-        source_url="https://kind.krx.co.kr/investwarn/adminissue.do",
+        source_url=(
+            "https://kind.krx.co.kr/investwarn/adminissue.do"
+            "?method=searchAdminIssueList"
+        ),
         published_date=observed.date(),
         fetched_at=observed,
         verification=VerificationStatus.OFFICIAL,
@@ -412,6 +415,69 @@ def test_harness_accepts_0730_pre_market_with_exact_previous_official_evidence(
             previous_business_date=previous,
             pre_market_nxt_evidence={"005930": nxt},
             morning_nxt_evidence={},
+        )
+
+    without_nxt_signal = replace(candidate, signals=[candidate.signals[0]])
+    with pytest.raises(ValueError, match="exactly one KRX and one NXT signal"):
+        ResearchHarness(calendar_bundle=calendar_bundle(observed)).run(
+            [without_nxt_signal],
+            observed,
+            "pre-market",
+            tmp_path / "missing-nxt-signal",
+            operational_evidence=operational,
+            previous_business_date=previous,
+            pre_market_nxt_evidence={},
+        )
+
+    extra_signal = replace(
+        candidate.signals[0],
+        group=SignalGroup.CATALYST,
+        reason="검증되지 않은 추가 신호",
+    )
+    with pytest.raises(ValueError, match="exactly one KRX and one NXT signal"):
+        ResearchHarness(calendar_bundle=calendar_bundle(observed)).run(
+            [replace(candidate, signals=[*candidate.signals, extra_signal])],
+            observed,
+            "pre-market",
+            tmp_path / "extra-signal",
+            operational_evidence=operational,
+            previous_business_date=previous,
+            pre_market_nxt_evidence={"005930": nxt},
+        )
+
+    without_kind = replace(
+        operational["005930"],
+        listing_risk=replace(operational["005930"].listing_risk, evidence=None),
+    )
+    with pytest.raises(ValueError, match="current KIND evidence"):
+        ResearchHarness(calendar_bundle=calendar_bundle(observed)).run(
+            [candidate],
+            observed,
+            "pre-market",
+            tmp_path / "missing-kind",
+            operational_evidence={"005930": without_kind},
+            previous_business_date=previous,
+            pre_market_nxt_evidence={"005930": nxt},
+        )
+
+    forged_kind = replace(
+        kind,
+        evidence_id="kind:listing-risk:forged:005930",
+        canonical_event_id="kind:listing-risk:forged:005930",
+    )
+    forged_operational = replace(
+        operational["005930"],
+        listing_risk=replace(operational["005930"].listing_risk, evidence=forged_kind),
+    )
+    with pytest.raises(ValueError, match="canonical KIND evidence"):
+        ResearchHarness(calendar_bundle=calendar_bundle(observed)).run(
+            [candidate],
+            observed,
+            "pre-market",
+            tmp_path / "forged-kind",
+            operational_evidence={"005930": forged_operational},
+            previous_business_date=previous,
+            pre_market_nxt_evidence={"005930": nxt},
         )
 
 
@@ -595,7 +661,7 @@ def test_harness_morning_mode_uses_previous_krx_price_and_same_day_kind(tmp_path
     observed = datetime(2026, 7, 21, 9, 25, tzinfo=ZoneInfo("Asia/Seoul"))
     nxt_url = "https://www.nextrade.co.kr/menu/transactionStatusMain/menuList.do"
     nxt_id = "nxt:price-snapshot:20260721:005930"
-    krx_url = "https://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_trd"
+    krx_url = "https://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_trd?basDd=20260720"
     krx_id = "krx:daily:KOSPI:20260720:005930"
     krx_fetched_at = datetime(2026, 7, 20, 20, 45, tzinfo=ZoneInfo("Asia/Seoul"))
     candidate = Candidate(
@@ -627,6 +693,7 @@ def test_harness_morning_mode_uses_previous_krx_price_and_same_day_kind(tmp_path
         evidence.price,
         evidence_id=krx_id,
         canonical_event_id=krx_id,
+        source_url=krx_url,
         published_date=date(2026, 7, 20),
         fetched_at=krx_fetched_at,
         metrics=(evidence.price.metrics | {"change_rate": 2.5}),
