@@ -210,6 +210,7 @@ class ResearchHarness:
         *,
         operational_evidence: dict[str, OperationalEvidence],
         previous_business_date: date | None = None,
+        pre_market_nxt_evidence: dict[str, EvidenceRecord] | None = None,
         morning_krx_live_snapshot: KrxLiveActivitySnapshot | None = None,
         morning_nxt_evidence: dict[str, EvidenceRecord] | None = None,
     ) -> HarnessResult:
@@ -217,10 +218,6 @@ class ResearchHarness:
             raise ValueError("mode must be pre-market, morning, or post-market")
         if observed_at.tzinfo is None or observed_at.utcoffset() is None:
             raise ValueError("observed_at must include a timezone")
-        if mode == "pre-market":
-            raise ValueError(
-                "pre-market 실행에는 캘린더 외에 공식 KRX 당일 운영상태 근거가 필요합니다"
-            )
         analysis_date = observed_at.astimezone(_KST).date()
         if self.calendar_bundle.as_of != observed_at:
             raise ValueError("calendar bundle must match analysis time")
@@ -230,7 +227,115 @@ class ResearchHarness:
         candidate_names = {candidate.ticker: candidate.name for candidate in candidates}
         candidates_by_ticker = {candidate.ticker: candidate for candidate in candidates}
         price_by_ticker: dict[str, Signal] = {}
-        if mode == "morning":
+        if mode == "pre-market":
+            analysis_time = observed_at.astimezone(_KST).timetz().replace(tzinfo=None)
+            if not time(7, 0) <= analysis_time < time(8, 0):
+                raise ValueError("pre-market analysis requires 07:00-08:00 KST")
+            if (
+                previous_business_date is None
+                or self.calendar_bundle.previous_business_date(analysis_date)
+                != previous_business_date
+            ):
+                raise ValueError("pre-market requires exact previous business date")
+            if pre_market_nxt_evidence is None:
+                raise ValueError("pre-market requires official previous NXT evidence")
+            if (
+                morning_krx_live_snapshot is not None
+                or morning_nxt_evidence is not None
+            ):
+                raise ValueError("morning evidence is invalid for pre-market")
+            cross_by_ticker: dict[str, Signal] = {}
+            for candidate in candidates:
+                price_signals = [
+                    signal
+                    for signal in candidate.signals
+                    if signal.group is SignalGroup.PRICE_VOLUME
+                ]
+                cross_signals = [
+                    signal
+                    for signal in candidate.signals
+                    if signal.group is SignalGroup.CROSS_MARKET
+                ]
+                if len(price_signals) != 1:
+                    raise ValueError(
+                        "pre-market candidates require one KRX price signal"
+                    )
+                if len(cross_signals) > 1:
+                    raise ValueError(
+                        "pre-market candidates allow at most one NXT signal"
+                    )
+                price_by_ticker[candidate.ticker] = price_signals[0]
+                if cross_signals:
+                    cross_by_ticker[candidate.ticker] = cross_signals[0]
+            if set(pre_market_nxt_evidence) != set(cross_by_ticker):
+                raise ValueError(
+                    "pre-market NXT evidence must match cross-market candidates"
+                )
+            for ticker, record in pre_market_nxt_evidence.items():
+                signal = cross_by_ticker[ticker]
+                source_value = record.metrics.get("source_as_of")
+                if not isinstance(source_value, str):
+                    raise ValueError("pre-market NXT source timestamp is invalid")
+                try:
+                    source_as_of = datetime.fromisoformat(source_value)
+                except ValueError:
+                    raise ValueError(
+                        "pre-market NXT source timestamp is invalid"
+                    ) from None
+                change_rate = record.metrics.get("change_rate")
+                volume = record.metrics.get("volume")
+                trading_value = record.metrics.get("trading_value")
+                metrics_invalid = (
+                    isinstance(change_rate, bool)
+                    or not isinstance(change_rate, (int, float))
+                    or not math.isfinite(float(change_rate))
+                    or isinstance(volume, bool)
+                    or not isinstance(volume, int)
+                    or volume < 0
+                    or isinstance(trading_value, bool)
+                    or not isinstance(trading_value, int)
+                    or trading_value < 0
+                )
+                if metrics_invalid:
+                    raise ValueError("invalid official pre-market NXT evidence")
+                rate = float(cast(int | float, change_rate))
+                volume = cast(int, volume)
+                trading_value = cast(int, trading_value)
+                expected_reason = (
+                    f"전 거래일 NXT 20분 지연 등락률 {rate:+.2f}%, "
+                    f"거래량 {volume:,}주, 거래대금 {trading_value:,}원"
+                )
+                expected_id = (
+                    f"nxt:price-snapshot:{previous_business_date:%Y%m%d}:{ticker}"
+                )
+                if (
+                    record.source is not EvidenceSource.NXT
+                    or record.evidence_id != expected_id
+                    or record.canonical_event_id != expected_id
+                    or record.is_correction
+                    or record.is_withdrawn
+                    or record.verification is not VerificationStatus.OFFICIAL
+                    or record.kind != "price-snapshot"
+                    or record.ticker != ticker
+                    or record.published_date != previous_business_date
+                    or record.delay_minutes != 20
+                    or record.company_name != candidate_names[ticker]
+                    or record.source_url
+                    != "https://www.nextrade.co.kr/menu/transactionStatusMain/menuList.do"
+                    or record.fetched_at > observed_at
+                    or source_as_of.tzinfo is None
+                    or source_as_of.utcoffset() is None
+                    or source_as_of.astimezone(_KST).date() != previous_business_date
+                    or source_as_of.astimezone(_KST).time() < time(20, 0)
+                    or source_as_of > record.fetched_at
+                    or signal.evidence_id != record.evidence_id
+                    or signal.source_url != record.source_url
+                    or signal.observed_at != record.fetched_at
+                    or signal.score != min(100.0, abs(rate) * 10.0)
+                    or signal.reason != expected_reason
+                ):
+                    raise ValueError("invalid official pre-market NXT evidence")
+        elif mode == "morning":
             analysis_time = observed_at.astimezone(_KST).timetz().replace(tzinfo=None)
             if not time(9, 20) <= analysis_time < time(12, 0):
                 raise ValueError("morning analysis requires 09:20-12:00 KST")
@@ -240,6 +345,8 @@ class ResearchHarness:
                 != previous_business_date
             ):
                 raise ValueError("morning requires exact previous business date")
+            if pre_market_nxt_evidence is not None:
+                raise ValueError("pre-market evidence is invalid for morning")
             if morning_krx_live_snapshot is None or morning_nxt_evidence is None:
                 raise ValueError("morning requires official KRX live and NXT evidence")
             live = morning_krx_live_snapshot
@@ -341,10 +448,11 @@ class ResearchHarness:
                     raise ValueError("invalid official morning NXT evidence")
         elif (
             previous_business_date is not None
+            or pre_market_nxt_evidence is not None
             or morning_krx_live_snapshot is not None
             or morning_nxt_evidence is not None
         ):
-            raise ValueError("morning evidence is only valid for morning")
+            raise ValueError("mode-specific evidence does not match analysis mode")
 
         if len(tickers) != len(set(tickers)):
             raise ValueError("중복 종목코드는 허용되지 않습니다")
@@ -356,10 +464,10 @@ class ResearchHarness:
             if evidence.ticker != ticker:
                 raise ValueError("운영 근거 map의 ticker가 일치하지 않습니다")
             price = evidence.price
-            if mode == "morning" and price is None:
-                raise ValueError("morning requires official KRX price evidence")
+            if mode in {"pre-market", "morning"} and price is None:
+                raise ValueError(f"{mode} requires official KRX price evidence")
             if price is not None:
-                if mode == "morning":
+                if mode in {"pre-market", "morning"}:
                     price_invalid = (
                         price.published_date != previous_business_date
                         or price.fetched_at > observed_at
@@ -374,7 +482,7 @@ class ResearchHarness:
                     raise ValueError(
                         "KRX 가격 근거의 기준일 또는 수집시각이 분석 mode와 일치하지 않습니다"
                     )
-                if mode == "morning":
+                if mode in {"pre-market", "morning"}:
                     _validate_morning_krx_signal(
                         candidates_by_ticker[ticker],
                         price_by_ticker[ticker],

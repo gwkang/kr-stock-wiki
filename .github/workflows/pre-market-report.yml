@@ -1,8 +1,8 @@
-name: Morning Live-Validated Research
+name: Pre-Market Research
 
 on:
   schedule:
-    - cron: "25 0 * * 1-5"
+    - cron: "30 22 * * 0-4"
   workflow_dispatch:
 
 permissions:
@@ -94,28 +94,20 @@ jobs:
           uv run kr-stock-wiki collect-krx \
             --date "$PREVIOUS_BUSINESS_DATE" \
             --output build/evidence/krx-previous.json
-      - name: Collect positive current official KRX live activity
+      - name: Collect complete previous official NXT session snapshot
         if: steps.scheduled_open.outputs.open == 'true'
         env:
-          BUSINESS_DATE: ${{ steps.clock.outputs.business_date }}
-        run: |
-          uv run kr-stock-wiki collect-krx-live \
-            --date "$BUSINESS_DATE" \
-            --output build/evidence/krx-live.json
-      - name: Collect complete current official NXT delayed snapshot
-        if: steps.scheduled_open.outputs.open == 'true'
-        env:
-          BUSINESS_DATE: ${{ steps.clock.outputs.business_date }}
+          PREVIOUS_BUSINESS_DATE: ${{ steps.scheduled_open.outputs.previous_business_date }}
         run: |
           uv run kr-stock-wiki collect-nxt \
-            --date "$BUSINESS_DATE" \
-            --output build/evidence/nxt.json
+            --date "$PREVIOUS_BUSINESS_DATE" \
+            --output build/evidence/nxt-previous.json
       - name: Resolve discovery timestamp
         if: steps.scheduled_open.outputs.open == 'true'
         id: discovery_clock
         run: |
           echo "as_of=$(TZ=Asia/Seoul date '+%Y-%m-%dT%H:%M:%S.%6N%:z')" >> "$GITHUB_OUTPUT"
-      - name: Build provisional official morning candidate input
+      - name: Build provisional official pre-market candidate input
         if: steps.scheduled_open.outputs.open == 'true'
         env:
           AS_OF: ${{ steps.discovery_clock.outputs.as_of }}
@@ -126,16 +118,15 @@ jobs:
             calendar_args+=(--calendar "$calendar")
           done
           test "${#calendar_args[@]}" -gt 0
-          uv run kr-stock-wiki build-morning-input \
+          uv run kr-stock-wiki build-pre-market-input \
             --watchlist config/watchlist.json \
             --krx-snapshot build/evidence/krx-previous.json \
-            --nxt-snapshot build/evidence/nxt.json \
-            --krx-live-snapshot build/evidence/krx-live.json \
+            --nxt-snapshot build/evidence/nxt-previous.json \
             "${calendar_args[@]}" \
             --previous-business-date "$PREVIOUS_DATE" \
             --as-of "$AS_OF" \
             --output build/evidence/candidates.json
-      - name: Collect complete KIND risk status for every morning candidate
+      - name: Collect complete KIND risk status for every pre-market candidate
         if: steps.scheduled_open.outputs.open == 'true'
         env:
           BUSINESS_DATE: ${{ steps.clock.outputs.business_date }}
@@ -154,7 +145,7 @@ jobs:
         id: analysis_clock
         run: |
           echo "as_of=$(TZ=Asia/Seoul date '+%Y-%m-%dT%H:%M:%S.%6N%:z')" >> "$GITHUB_OUTPUT"
-      - name: Rebuild official morning candidate input at final analysis time
+      - name: Rebuild official pre-market candidate input at final analysis time
         if: steps.scheduled_open.outputs.open == 'true'
         env:
           AS_OF: ${{ steps.analysis_clock.outputs.as_of }}
@@ -165,16 +156,15 @@ jobs:
             calendar_args+=(--calendar "$calendar")
           done
           test "${#calendar_args[@]}" -gt 0
-          uv run kr-stock-wiki build-morning-input \
+          uv run kr-stock-wiki build-pre-market-input \
             --watchlist config/watchlist.json \
             --krx-snapshot build/evidence/krx-previous.json \
-            --nxt-snapshot build/evidence/nxt.json \
-            --krx-live-snapshot build/evidence/krx-live.json \
+            --nxt-snapshot build/evidence/nxt-previous.json \
             "${calendar_args[@]}" \
             --previous-business-date "$PREVIOUS_DATE" \
             --as-of "$AS_OF" \
             --output build/evidence/candidates.json
-      - name: Generate fail-closed morning Wiki report
+      - name: Generate fail-closed pre-market Wiki report
         if: steps.scheduled_open.outputs.open == 'true'
         env:
           PREVIOUS_DATE: ${{ steps.scheduled_open.outputs.previous_business_date }}
@@ -188,22 +178,21 @@ jobs:
             --input build/evidence/candidates.json \
             --watchlist config/watchlist.json \
             --krx-snapshot build/evidence/krx-previous.json \
-            --nxt-snapshot build/evidence/nxt.json \
-            --krx-live-snapshot build/evidence/krx-live.json \
+            --nxt-snapshot build/evidence/nxt-previous.json \
             "${calendar_args[@]}" \
             --previous-business-date "$PREVIOUS_DATE" \
             --kind-status build/evidence/kind.json \
             --output wiki
           uv run kr-stock-wiki lint --wiki wiki
-      - name: Preserve official-snapshots morning audit artifact
+      - name: Preserve official-snapshots pre-market audit artifact
         if: always() && steps.scheduled_open.outputs.open == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: official-snapshots-morning-${{ steps.clock.outputs.business_date }}
+          name: official-snapshots-pre-market-${{ steps.clock.outputs.business_date }}
           path: build/evidence/
           if-no-files-found: warn
           retention-days: 30
-      - name: Commit validated morning Wiki source
+      - name: Commit validated pre-market Wiki source
         if: steps.scheduled_open.outputs.open == 'true'
         id: source_commit
         env:
@@ -215,7 +204,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -- wiki
           if ! git diff --cached --quiet; then
-            git commit -m "docs: publish $BUSINESS_DATE morning research"
+            git commit -m "docs: publish $BUSINESS_DATE pre-market research"
             git push origin HEAD:main
           fi
           echo "source_ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"

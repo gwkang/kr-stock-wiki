@@ -15,7 +15,7 @@
 - 실제 GitHub Wiki 저장소에 복사할 동기화 엔진
 - 공식 OpenDART 공시검색·KRX 일별 시세·NXT 20분 지연 시세 및 세션 집계·연합뉴스 RSS 수집기와 공통 근거 데이터 계약
 - CLI, pytest, GitHub Actions CI
-- 평일 09:25 KST 당일 KRX·NXT 실거래 검증 오전 리포트와 20:45 KST post-market 리포트의 `wiki/` 커밋 및 GitHub Wiki 자동 배포
+- 평일 07:30 KST 장전 리포트와 20:45 KST post-market 리포트의 `wiki/` 커밋 및 GitHub Wiki 자동 배포
 
 OpenDART·KRX·NXT·연합뉴스 RSS·KRX KIND 투자유의 상태 수집기가 구현됐습니다. OpenDART와 KRX는 각 API 키를 연결하면 공식 공시 및 KOSPI·KOSDAQ 일별 시세 스냅샷을 생성하며, NXT·연합뉴스 RSS·KIND는 별도 인증 없이 공식 웹사이트에서 각각 시세·세션 집계, 경제·산업·마켓 기사, 관리종목·거래정지·투자경고/위험 상태를 수집합니다. 투자자별 수급 수집기는 아직 연결되지 않았습니다. 샘플 신호는 입력 구조와 테스트 검증용으로만 사용하며 실제 최신 후보로 게시하지 않습니다.
 
@@ -28,7 +28,7 @@ uv run pytest
 
 ## 리포트 생성
 
-`run`은 구조 예제만으로 실행되지 않습니다. 모든 mode는 분석일과 5거래일 만료일을 계산할 수 있는 공식 KRX 연간 calendar artifact가 필요하며, 연말에는 다음 연도 artifact도 함께 전달해야 합니다. post-market 후보에는 같은 기준일의 완전한 KRX 양시장 스냅샷이 필요합니다. `morning` 후보에는 공식 calendar가 계산한 정확한 전 거래일의 완전한 KRX 양시장 스냅샷, 당일 KOSPI·KOSDAQ 양 시장의 공식 live 실거래 activity, `source_as_of ≥ 09:00 KST`인 NXT 20분 지연 snapshot이 모두 필요합니다. 두 mode 모두 분석일과 일치하는 후보별 KIND 상태가 필요합니다. 연간 휴장일 calendar만으로는 당일 실제 운영상태를 증명할 수 없으므로 07:30 `pre-market` 실행은 계속 fail-closed로 차단됩니다.
+`run`은 구조 예제만으로 실행되지 않습니다. 모든 mode는 분석일과 5거래일 만료일을 계산할 수 있는 공식 KRX 연간 calendar artifact가 필요하며, 연말에는 다음 연도 artifact도 함께 전달해야 합니다. post-market 후보에는 같은 기준일의 완전한 KRX 양시장 스냅샷이 필요합니다. `pre-market` 후보에는 calendar가 계산한 정확한 직전 거래일의 완전한 KRX 양시장 스냅샷과 NXT 20분 지연 종가·세션 집계가 필요합니다. 두 mode 모두 분석일과 일치하는 후보별 KIND 상태가 필요합니다. 07:30 장전 리포트는 당일 KRX·NXT 거래가 시작됐다고 주장하지 않으며, 직전 공식 세션의 가격·거래량·거래대금과 분석일 예정 휴장 여부만 사용합니다.
 
 ```bash
 uv run kr-stock-wiki run \
@@ -160,9 +160,9 @@ uv run kr-stock-wiki collect-news \
 
 ## 거래일 및 운영 필터
 
-`TradingDayGate`는 토·일요일을 휴장으로 처리하고, post-market 평일에는 같은 기준일의 공식 KRX 검증 스냅샷이 KOSPI·KOSDAQ 양 endpoint 완료, 시장별 cardinality 하한, ticker 유일성을 모두 충족할 때만 `open`으로 판정합니다. 임의 EvidenceRecord 목록은 입력으로 받지 않습니다. 평일에 스냅샷이 없거나 endpoint 완료가 빠지거나 어느 시장의 레코드가 0건이면 휴장으로 추정하지 않고 `unknown`, 1건 이상이지만 운영 하한 미만이면 부분 응답으로 처리합니다. 연간 calendar는 예정 휴장일을 판정하는 보조 근거로만 수집합니다. 평일이 목록에 없다는 음성 근거만으로 당일 실제 개장이나 정규 세션 시각을 확정하지 않으며, 별도의 공식 KRX 당일 운영상태 근거가 연결될 때까지 07:30 pre-market 실행은 CLI와 `ResearchHarness` 직접 호출 모두에서 fail-closed로 차단합니다.
+`TradingDayGate`는 토·일요일을 휴장으로 처리하고, post-market 평일에는 같은 기준일의 공식 KRX 검증 스냅샷이 KOSPI·KOSDAQ 양 endpoint 완료, 시장별 cardinality 하한, ticker 유일성을 모두 충족할 때만 `open`으로 판정합니다. pre-market은 분석일 calendar가 예정 거래일인지 확인하고, 같은 calendar가 계산한 exact 직전 거래일의 완전한 KRX snapshot으로 전일 세션을 검증합니다. calendar는 당일 실제 개장이나 세션 상태를 증명하지 않으므로 장전 리포트는 당일 거래가 시작됐다는 주장이나 당일 live signal을 만들지 않습니다.
 
-`OperationalFilter`의 기본 유동성 하한은 종가 1,000원, 거래량 100,000주, 거래대금 50억원, 시가총액 1,000억원입니다. 기준은 생성자 인자로 명시적으로 변경할 수 있습니다. 관리종목·거래정지·투자경고는 KIND 공식 `listing-risk-status` 근거의 정수 `0/1` 값으로 확인돼야 하며 근거가 없거나 출처·ticker·기준일이 불일치하면 fail-closed로 후보에서 제외되거나 입력을 거부합니다. `as_of` 이후 수집된 근거는 금지하며 KIND는 최대 1시간 이내 freshness를 요구합니다. post-market KRX 일별 스냅샷은 최대 12시간으로 제한합니다. morning은 공식 calendar에서 계산한 정확한 직전 예정 거래일의 KRX 스냅샷과 10분 이내의 당일 KRX 양시장 live activity를 요구합니다. 긴 연휴에도 정확한 직전 거래일을 허용하기 위해 morning 일별 스냅샷에는 임의 calendar-day 상한을 두지 않습니다. `ResearchHarness.run`은 임의 운영 판정 map을 받지 않고 모든 후보와 정확히 일치하는 `OperationalEvidence` map의 KRX 가격·KIND 위험 근거를 자체 검증해 판정을 재계산하므로 직접 호출에서도 `eligible=True` 주입으로 필터를 우회할 수 없습니다.
+`OperationalFilter`의 기본 유동성 하한은 종가 1,000원, 거래량 100,000주, 거래대금 50억원, 시가총액 1,000억원입니다. 기준은 생성자 인자로 명시적으로 변경할 수 있습니다. 관리종목·거래정지·투자경고는 KIND 공식 `listing-risk-status` 근거의 정수 `0/1` 값으로 확인돼야 하며 근거가 없거나 출처·ticker·기준일이 불일치하면 fail-closed로 후보에서 제외되거나 입력을 거부합니다. `as_of` 이후 수집된 근거는 금지하며 KIND는 최대 1시간 이내 freshness를 요구합니다. post-market KRX 일별 스냅샷은 최대 12시간으로 제한합니다. pre-market은 exact 직전 거래일의 KRX·NXT 완전 snapshot을 요구하며 긴 연휴에도 calendar가 계산한 직전 거래일이면 임의 wall-clock age 상한을 적용하지 않습니다. `ResearchHarness.run`은 모든 후보와 정확히 일치하는 `OperationalEvidence` 및 canonical NXT evidence를 자체 검증해 판정을 재계산합니다.
 
 ## 입력 계약
 
@@ -180,11 +180,11 @@ uv run kr-stock-wiki collect-news \
 
 모든 신호에는 원문 `source_url`과 관측 시각이 필요합니다.
 
-## 오전 live-validated 자동 리포트
+## 07:30 장전 자동 리포트
 
-`.github/workflows/morning-report.yml`은 평일 `00:25 UTC`(09:25 KST)에 실행됩니다. 07:30에는 공개 공식 원천에서 KRX·NXT의 당일 정상운영을 긍정적으로 확정할 수 없으므로 실행하지 않습니다. 09:25에는 KRX Data Marketplace 공식 메인 JSON의 당일 KOSPI·KOSDAQ 투자자별 누적 매수·매도 거래대금이 각 시장에서 양수인지 확인하고, NXT 당일 종목별 20분 지연 quote의 `source_as_of ≥ 09:00 KST`와 양수 거래량·거래대금을 확인합니다.
+`.github/workflows/pre-market-report.yml`은 한국 평일 07:30 KST에 실행됩니다. UTC cron은 한국의 월–금과 정확히 맞도록 일–목 `22:30 UTC`(`30 22 * * 0-4`)입니다. 분석일이 official calendar의 예정 거래일이 아니면 정상 종료하고 Wiki를 변경하지 않습니다.
 
-오전 후보는 공식 calendar에서 계산한 정확한 직전 예정 거래일의 KRX `price-volume`과 당일 NXT `cross-market`을 독립 근거로 사용합니다. NXT 종목 자체의 거래량·거래대금이 모두 양수일 때만 `cross-market` 신호를 생성합니다. 당일 KRX live activity는 후보 점수를 올리는 종목별 신호가 아니라 양 시장 실제 운영 gate이며 양시장별 공식 원천시각을 각각 보존합니다. calendar는 직전 예정 거래일 계산과 예정 휴장 veto에만 사용합니다. 당일 KRX 양 시장 실거래, 당일 NXT 실거래, 정확한 직전 거래일 KRX 완전 snapshot, 당일 KIND 상태 또는 시각 계보 중 하나라도 실패하면 Wiki를 변경하지 않습니다. 후보 artifact는 post-market과 마찬가지로 게시 직전 원본 snapshot에서 전체 재계산합니다.
+장전 후보는 calendar가 계산한 exact 직전 거래일의 완전한 KRX `price-volume`과 NXT 20분 지연 `cross-market`을 독립 근거로 사용합니다. NXT session-summary와 종목별 canonical quote가 직전 거래일에 결속돼야 하며, 모든 후보의 분석일 KIND 위험 상태를 다시 확인합니다. candidate artifact는 게시 직전 동일 watchlist·KRX·NXT snapshot에서 전체 재계산해 deep-equality로 대조합니다. 07:30에는 당일 KRX·NXT 실거래를 요구하거나 정상 개장을 주장하지 않습니다.
 
 ## 일일 post-market 자동 리포트
 
@@ -205,14 +205,13 @@ uv run kr-stock-wiki collect-news \
 
 신호 점수는 각 시장의 공식 등락률 절댓값에 10을 곱해 0~100으로 제한하는 결정론적 값입니다. ranker에서 KRX 그룹은 최대 20점, NXT 그룹은 최대 10점으로 제한됩니다. NXT 거래대상이 아니거나 quote가 없는 종목은 KRX 신호만 남으므로 독립 그룹·근거 2개 조건을 통과하지 않습니다. 거래일은 최종 KRX 양시장 완전 snapshot으로 다시 확인하고, 유동성 하한과 KIND 위험 상태를 모두 통과한 경우에만 게시합니다. 적격 종목이 없으면 억지로 채우지 않고 후보 없음으로 게시합니다.
 
-현재 자동 리포트는 **공식 가격·거래량·거래대금과 운영 위험에 기반한 결정론적 1차 버전**입니다. OpenDART 공시·연합뉴스 기사·공식 투자자별 수급을 자동 후보 신호로 결합하는 adapter와 실제 LLM 역할 실행은 아직 연결되지 않았습니다. 07:30 pre-market은 계속 fail-closed이며, 당일 실제 KRX·NXT 운영 positive evidence를 확보할 수 있는 09:25 morning mode를 별도로 활성화합니다.
+현재 자동 리포트는 **공식 가격·거래량·거래대금과 운영 위험에 기반한 결정론적 1차 버전**입니다. OpenDART 공시·연합뉴스 기사·공식 투자자별 수급을 자동 후보 신호로 결합하는 adapter와 실제 LLM 역할 실행은 아직 연결되지 않았습니다.
 
-수동 재실행은 Actions의 `Morning Live-Validated Research`와 `Daily Post-Market Research`에서 가능합니다. morning builder는 09:20~12:00 KST 밖의 실행을, post-market builder는 20:20 KST 이전 실행을 거부합니다.
+수동 재실행은 Actions의 `Pre-Market Research`와 `Daily Post-Market Research`에서 가능합니다. pre-market builder는 07:00~08:00 KST 밖의 실행을, post-market builder는 20:20 KST 이전 실행을 거부합니다.
 
 ## 예정 운영 시각
 
-- 07:30 KST: **비활성** — 공개 공식 원천에서 양 시장의 당일 정상운영 positive evidence를 아직 확보할 수 없음
-- 09:25 KST: **활성** — KRX 양시장 당일 실거래와 NXT `source_as_of ≥ 09:00`을 fail-closed 검증
+- 07:30 KST: **활성** — exact 직전 거래일 KRX·NXT와 분석일 KIND 상태 기반 장전 리포트
 - 20:45 KST: **활성** — NXT 20분 지연 애프터마켓 snapshot 반영
 
 ## 면책

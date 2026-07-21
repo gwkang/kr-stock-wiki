@@ -67,7 +67,9 @@ def _summary_integer(record: EvidenceRecord, name: str) -> int:
     return value
 
 
-def _validate_session_summary(record: EvidenceRecord, business_date) -> None:
+def _validate_session_summary(
+    record: EvidenceRecord, business_date: date, *, historical_collection: bool = False
+) -> None:
     expected_id = f"nxt:session-summary:{business_date:%Y%m%d}"
     expected_metrics = {
         "pre_session",
@@ -100,7 +102,10 @@ def _validate_session_summary(record: EvidenceRecord, business_date) -> None:
         or record.metrics.get("pre_session") != "08:00-08:50"
         or record.metrics.get("main_session") != "09:00:30-15:20"
         or record.metrics.get("after_session") != "15:40-20:00"
-        or record.fetched_at.astimezone(_KST).time() < time(20, 0)
+        or (
+            not historical_collection
+            and record.fetched_at.astimezone(_KST).time() < time(20, 0)
+        )
     ):
         raise ValueError("invalid NXT post-market session-summary")
     for name in ("pre", "main", "after"):
@@ -131,6 +136,8 @@ def _nxt_quotes(
     as_of: datetime,
     minimum_source_time: time = time(20, 20),
     require_summary: bool = True,
+    maximum_age: timedelta | None = _MAX_NXT_AGE,
+    historical_collection: bool = False,
 ) -> dict[str, EvidenceRecord]:
     if (
         not isinstance(payload, dict)
@@ -156,9 +163,12 @@ def _nxt_quotes(
         raise ValueError("NXT collected_at must include a timezone")
     if collected_at > as_of:
         raise ValueError("NXT snapshot contains future collection time")
-    if as_of - collected_at > _MAX_NXT_AGE:
+    if maximum_age is not None and as_of - collected_at > maximum_age:
         raise ValueError("NXT snapshot collection time is not fresh")
-    if collected_at.astimezone(_KST).date() != business_date:
+    collected_date = collected_at.astimezone(_KST).date()
+    if (historical_collection and collected_date <= business_date) or (
+        not historical_collection and collected_date != business_date
+    ):
         raise ValueError("NXT collected_at date mismatch")
 
     quotes: dict[str, EvidenceRecord] = {}
@@ -175,7 +185,7 @@ def _nxt_quotes(
             raise ValueError("NXT record contains future evidence")
         if record.fetched_at > collected_at:
             raise ValueError("NXT record time lineage is inconsistent")
-        if as_of - record.fetched_at > _MAX_NXT_AGE:
+        if maximum_age is not None and as_of - record.fetched_at > maximum_age:
             raise ValueError("NXT record is not fresh")
         if record.kind == "session-summary":
             if not require_summary:
@@ -183,7 +193,11 @@ def _nxt_quotes(
                     "NXT morning snapshot must not contain a session-summary"
                 )
             summary_count += 1
-            _validate_session_summary(record, business_date)
+            _validate_session_summary(
+                record,
+                business_date,
+                historical_collection=historical_collection,
+            )
             continue
         expected_quote_id = (
             f"nxt:price-snapshot:{business_date:%Y%m%d}:{record.ticker}"
@@ -223,7 +237,7 @@ def _nxt_quotes(
         if (
             source_as_of > as_of
             or source_as_of.astimezone(_KST).date() != business_date
-            or as_of - source_as_of > _MAX_NXT_AGE
+            or (maximum_age is not None and as_of - source_as_of > maximum_age)
         ):
             raise ValueError("NXT quote source time is not fresh same-day evidence")
         quotes[record.ticker] = record
@@ -339,6 +353,117 @@ def build_post_market_input(
         "as_of": as_of.isoformat(),
         "business_date": business_date.isoformat(),
         "mode": "post-market",
+        "candidates": candidates,
+    }
+
+
+def build_pre_market_input(
+    watchlist_payload: object,
+    previous_krx_snapshot: KrxDailySnapshot,
+    previous_nxt_snapshot_payload: object,
+    calendar_bundle: KrxCalendarBundle,
+    previous_business_date: date,
+    as_of: datetime,
+) -> dict[str, Any]:
+    """Build 07:30 candidates from the exact previous official market session."""
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise ValueError("as_of must include a timezone")
+    as_of_kst = as_of.astimezone(_KST)
+    analysis_time = as_of_kst.timetz().replace(tzinfo=None)
+    if not time(7, 0) <= analysis_time < time(8, 0):
+        raise ValueError("pre-market analysis requires 07:00-08:00 KST")
+    business_date = as_of_kst.date()
+    if calendar_bundle.as_of != as_of:
+        raise ValueError("pre-market calendar bundle must match analysis time")
+    if not calendar_bundle.is_scheduled_trading_day(business_date):
+        raise ValueError("pre-market analysis date is a scheduled KRX closure")
+    if calendar_bundle.previous_business_date(business_date) != previous_business_date:
+        raise ValueError("pre-market previous date does not match official calendar")
+    if (
+        not previous_krx_snapshot.coverage_complete
+        or previous_krx_snapshot.business_date != previous_business_date
+        or previous_business_date >= business_date
+        or previous_krx_snapshot.fetched_at > as_of
+    ):
+        raise ValueError("invalid exact previous KRX daily snapshot")
+
+    stocks = _watchlist(watchlist_payload)
+    krx_records = {record.ticker: record for record in previous_krx_snapshot.records}
+    quotes = _nxt_quotes(
+        previous_nxt_snapshot_payload,
+        business_date=previous_business_date,
+        as_of=as_of,
+        minimum_source_time=time(20, 0),
+        require_summary=True,
+        maximum_age=None,
+        historical_collection=True,
+    )
+    candidates: list[dict[str, Any]] = []
+    for ticker, configured_name in stocks:
+        krx = krx_records.get(ticker)
+        if krx is None:
+            raise ValueError(f"watchlist ticker {ticker} is missing from KRX snapshot")
+        if krx.company_name != configured_name:
+            raise ValueError(f"watchlist name mismatch for {ticker}")
+        if (
+            krx.source is not EvidenceSource.KRX
+            or krx.verification is not VerificationStatus.OFFICIAL
+            or krx.kind != "daily-price"
+            or krx.published_date != previous_business_date
+        ):
+            raise ValueError("invalid official previous KRX daily-price evidence")
+        change_rate = _finite_number(krx.metrics.get("change_rate"), "KRX change_rate")
+        volume = _integer_metric(krx, "volume")
+        trading_value = _integer_metric(krx, "trading_value")
+        signals: list[dict[str, Any]] = [
+            {
+                "group": "price-volume",
+                "score": _score(change_rate, "KRX change_rate"),
+                "reason": (
+                    f"전 거래일 KRX 등락률 {change_rate:+.2f}%, 거래량 {volume:,}주, "
+                    f"거래대금 {trading_value:,}원"
+                ),
+                "source_url": krx.source_url,
+                "observed_at": krx.fetched_at.isoformat(),
+                "evidence_id": krx.evidence_id,
+            }
+        ]
+        nxt = quotes.get(ticker)
+        if nxt is not None:
+            if nxt.company_name != krx.company_name:
+                raise ValueError(f"KRX/NXT company name mismatch for {ticker}")
+            nxt_change_rate = _finite_number(
+                nxt.metrics.get("change_rate"), "NXT change_rate"
+            )
+            nxt_volume = _integer_metric(nxt, "volume")
+            nxt_trading_value = _integer_metric(nxt, "trading_value")
+            signals.append(
+                {
+                    "group": "cross-market",
+                    "score": _score(nxt_change_rate, "NXT change_rate"),
+                    "reason": (
+                        f"전 거래일 NXT 20분 지연 등락률 {nxt_change_rate:+.2f}%, "
+                        f"거래량 {nxt_volume:,}주, 거래대금 {nxt_trading_value:,}원"
+                    ),
+                    "source_url": nxt.source_url,
+                    "observed_at": nxt.fetched_at.isoformat(),
+                    "evidence_id": nxt.evidence_id,
+                }
+            )
+        candidates.append(
+            {
+                "ticker": ticker,
+                "name": krx.company_name,
+                "risk_penalty": 0,
+                "signals": signals,
+            }
+        )
+    return {
+        "schema_version": 1,
+        "source": "official-pre-market-builder",
+        "as_of": as_of.isoformat(),
+        "business_date": business_date.isoformat(),
+        "mode": "pre-market",
         "candidates": candidates,
     }
 

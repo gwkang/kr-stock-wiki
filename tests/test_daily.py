@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
 
+from kr_stock_wiki import daily
 from kr_stock_wiki.collectors.calendar import (
     KrxCalendarBundle,
     KrxMarketCalendar,
@@ -169,6 +171,35 @@ def watchlist(*items: tuple[str, str]) -> dict[str, object]:
         "source": "user-watchlist",
         "stocks": [{"ticker": ticker, "name": name} for ticker, name in items],
     }
+
+
+def test_build_pre_market_input_uses_exact_previous_krx_and_nxt_at_0730():
+    analysis_at = datetime(2026, 7, 21, 7, 30, tzinfo=KST)
+    krx = price_record()
+    nxt = replace(
+        price_record(source=EvidenceSource.NXT),
+        fetched_at=analysis_at - timedelta(minutes=1),
+    )
+
+    payload = daily.build_pre_market_input(
+        watchlist(("005930", "삼성전자")),
+        krx_snapshot(krx),
+        nxt_payload(nxt),
+        calendar_bundle(analysis_at),
+        BUSINESS_DATE,
+        analysis_at,
+    )
+
+    assert payload["source"] == "official-pre-market-builder"
+    assert payload["mode"] == "pre-market"
+    assert payload["business_date"] == "2026-07-21"
+    candidate = payload["candidates"][0]
+    assert [signal["evidence_id"] for signal in candidate["signals"]] == [
+        krx.evidence_id,
+        nxt.evidence_id,
+    ]
+    assert candidate["signals"][0]["reason"].startswith("전 거래일 KRX")
+    assert candidate["signals"][1]["reason"].startswith("전 거래일 NXT")
 
 
 def test_build_post_market_input_uses_independent_official_krx_and_nxt_signals():

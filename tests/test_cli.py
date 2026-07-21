@@ -896,7 +896,7 @@ def test_cli_run_fails_closed_without_official_same_day_operating_status(
     )
 
     assert code == 2
-    assert "공식 KRX 당일 운영상태" in capsys.readouterr().err
+    assert "official pre-market candidate input" in capsys.readouterr().err
     assert not (tmp_path / "wiki").exists()
 
 
@@ -1127,6 +1127,25 @@ def test_collect_krx_live_writes_same_day_market_activity(tmp_path: Path, monkey
     assert payload["business_date"] == "2026-07-21"
 
 
+def test_candidate_loader_accepts_official_pre_market_analysis_date(tmp_path: Path):
+    source = tmp_path / "pre-market.json"
+    payload = {
+        "schema_version": 1,
+        "source": "official-pre-market-builder",
+        "as_of": "2026-07-21T07:30:00+09:00",
+        "business_date": "2026-07-21",
+        "mode": "pre-market",
+        "candidates": [],
+    }
+    source.write_text(json.dumps(payload), encoding="utf-8")
+
+    _observed, business_date, mode, source_name, _candidates = _load_candidates(source)
+
+    assert business_date == date(2026, 7, 21)
+    assert mode == "pre-market"
+    assert source_name == "official-pre-market-builder"
+
+
 def test_candidate_loader_accepts_only_same_day_official_morning_envelope(
     tmp_path: Path,
 ):
@@ -1268,3 +1287,151 @@ def test_build_morning_input_cli_writes_canonical_official_artifact(tmp_path: Pa
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["source"] == "official-morning-builder"
     assert payload["candidates"][0]["ticker"] == "005930"
+
+
+def test_build_pre_market_input_cli_writes_previous_session_artifact(tmp_path: Path):
+    kst = ZoneInfo("Asia/Seoul")
+    previous = date(2026, 7, 20)
+    observed = datetime(2026, 7, 21, 7, 30, tzinfo=kst)
+    nxt_fetched = observed - timedelta(minutes=1)
+    krx_path, kind_path = write_operational_snapshots(
+        tmp_path, business_date=previous, analysis_date=observed.date()
+    )
+    kind_payload = json.loads(kind_path.read_text(encoding="utf-8"))
+    kind_payload["collected_at"] = observed.isoformat()
+    kind_payload["records"][0]["fetched_at"] = observed.isoformat()
+    kind_path.write_text(json.dumps(kind_payload), encoding="utf-8")
+    krx_payload = json.loads(krx_path.read_text(encoding="utf-8"))
+    krx_payload["records"][0]["metrics"]["change_rate"] = 2.5
+    krx_path.write_text(json.dumps(krx_payload), encoding="utf-8")
+    watchlist = tmp_path / "watchlist-pre.json"
+    watchlist.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source": "user-watchlist",
+                "stocks": [{"ticker": "005930", "name": "005930"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    quote_id = "nxt:price-snapshot:20260720:005930"
+    quote = EvidenceRecord(
+        source=EvidenceSource.NXT,
+        evidence_id=quote_id,
+        canonical_event_id=quote_id,
+        kind="price-snapshot",
+        company_name="005930",
+        title="NXT previous close",
+        source_url="https://www.nextrade.co.kr/menu/transactionStatusMain/menuList.do",
+        published_date=previous,
+        fetched_at=nxt_fetched,
+        verification=VerificationStatus.OFFICIAL,
+        ticker="005930",
+        delay_minutes=20,
+        metrics={
+            "change_rate": 1.5,
+            "volume": 150_000,
+            "trading_value": 10_800_000_000,
+            "source_as_of": "2026-07-20T20:05:00+09:00",
+        },
+    )
+    summary_id = "nxt:session-summary:20260720"
+    summary = EvidenceRecord(
+        source=EvidenceSource.NXT,
+        evidence_id=summary_id,
+        canonical_event_id=summary_id,
+        kind="session-summary",
+        company_name="NEXTRADE",
+        title="NXT session summary",
+        source_url="https://www.nextrade.co.kr/menu/transactionStatusDaily/menuList.do",
+        published_date=previous,
+        fetched_at=nxt_fetched,
+        verification=VerificationStatus.OFFICIAL,
+        metrics={
+            "pre_session": "08:00-08:50",
+            "pre_instruments": 1,
+            "pre_volume": 1,
+            "pre_trading_value": 1,
+            "main_session": "09:00:30-15:20",
+            "main_instruments": 1,
+            "main_volume": 1,
+            "main_trading_value": 1,
+            "after_session": "15:40-20:00",
+            "after_instruments": 1,
+            "after_volume": 1,
+            "after_trading_value": 1,
+            "total_instruments": 1,
+            "total_volume": 3,
+            "total_trading_value": 3,
+            "volume_market_share": 1.0,
+        },
+    )
+    nxt_path = tmp_path / "nxt-previous.json"
+    nxt_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source": "nxt",
+                "collected_at": nxt_fetched.isoformat(),
+                "date": previous.isoformat(),
+                "quote_delay_minutes": 20,
+                "records": [summary.to_dict(), quote.to_dict()],
+            }
+        ),
+        encoding="utf-8",
+    )
+    calendar = write_calendar(tmp_path, observed)
+    output = tmp_path / "pre-market.json"
+
+    code = main(
+        [
+            "build-pre-market-input",
+            "--watchlist",
+            str(watchlist),
+            "--krx-snapshot",
+            str(krx_path),
+            "--nxt-snapshot",
+            str(nxt_path),
+            "--calendar",
+            str(calendar),
+            "--previous-business-date",
+            previous.isoformat(),
+            "--as-of",
+            observed.isoformat(),
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert code == 0
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["source"] == "official-pre-market-builder"
+    assert payload["business_date"] == "2026-07-21"
+    assert payload["candidates"][0]["signals"][1]["evidence_id"] == quote_id
+
+    wiki = tmp_path / "wiki-pre-market"
+    run_code = main(
+        [
+            "run",
+            "--input",
+            str(output),
+            "--watchlist",
+            str(watchlist),
+            "--krx-snapshot",
+            str(krx_path),
+            "--nxt-snapshot",
+            str(nxt_path),
+            "--calendar",
+            str(calendar),
+            "--previous-business-date",
+            previous.isoformat(),
+            "--kind-status",
+            str(kind_path),
+            "--output",
+            str(wiki),
+        ]
+    )
+
+    assert run_code == 0
+    assert (wiki / "Home.md").exists()

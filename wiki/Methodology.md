@@ -13,21 +13,18 @@ confidence: high
 ## 범위
 
 - 투자 시간 범위: 1~5거래일
-- 활성 실행: 평일 09:25 KST live-validated morning, 평일 20:45 KST post-market
-- 비활성 실행: 07:30 KST pre-market — 공개 공식 원천에서 KRX·NXT의 당일 정상운영 positive evidence를 확보할 수 없어 실행하지 않음
+- 활성 실행: 평일 07:30 KST pre-market, 평일 20:45 KST post-market
 - 시장: KRX와 NXT 프리·메인·애프터마켓
 - 관심종목: 최대 20개
 - 심층 리포트: 최대 5개
 
-## 공식 morning 근거
+## 공식 pre-market 근거
 
-1. Global KRX 연간 calendar는 당일 예정 휴장 veto와 최근 전 거래일 계산에만 사용하며 정상 운영 positive evidence로 승격하지 않습니다.
-2. KRX Data Marketplace 공식 메인 JSON에서 분석일 당일의 KOSPI·KOSDAQ 투자자별 누적 매수·매도 거래대금이 양 시장 모두 양수이고, 각 시장의 공식 `CURRENT_DATETIME`이 09:00 KST 이후이며 수집시각과 5분 이내인 경우에만 KRX가 실제 운영 중이었다고 인정합니다. artifact는 양시장별 원천시각을 각각 보존하며 두 시각의 차이가 2분 이내인지 파일 재로딩 때도 검증합니다.
-3. NXT는 당일 종목별 20분 지연 quote의 `source_as_of ≥ 09:00 KST`와 양수 거래량·거래대금을 요구합니다. 따라서 09:20 이전에는 morning builder가 실행을 거부하고 예약은 09:25 KST입니다.
-4. 후보 신호는 공식 calendar에서 계산한 정확한 직전 예정 거래일의 완전한 KRX `price-volume`과 당일 NXT `cross-market`을 결합합니다. NXT 종목 자체의 거래량·거래대금이 모두 양수일 때만 `cross-market` 신호를 부여합니다. KRX live activity는 시장 운영 gate이며 종목별 점수 신호가 아닙니다.
-5. 모든 후보의 당일 KIND 위험 상태와 candidate 전체 canonical 재계산을 통과해야 합니다.
-
-07:30에는 KRX·NXT의 당일 정상 운영을 긍정적으로 확정하는 공개 공식 heartbeat가 없습니다. calendar의 예정 영업일, 정적 거래시간, 공지 부재를 정상 운영으로 간주하지 않습니다.
+1. Global KRX 연간 calendar로 분석일이 예정 거래일인지 확인하고 exact 직전 거래일을 계산합니다. calendar는 당일 실제 정상 개장 근거로 승격하지 않습니다.
+2. exact 직전 거래일의 KOSPI·KOSDAQ 완전 KRX 일별 snapshot과 NXT session-summary·종목별 20분 지연 canonical quote를 사용합니다.
+3. 후보 신호는 직전 거래일 KRX `price-volume`과 NXT `cross-market`을 결합하며 ID·URL·시각·등락률·거래량·거래대금·score·reason을 공식 record에 결속합니다.
+4. 모든 후보의 분석일 KIND 위험 상태와 candidate 전체 canonical 재계산을 통과해야 합니다.
+5. 07:30에는 당일 KRX·NXT 거래가 시작됐거나 정상 개장했다고 주장하지 않습니다. 당일 live activity는 장전 후보 신호에 포함하지 않습니다.
 
 ## 공식 post-market 근거
 

@@ -256,29 +256,162 @@ def test_harness_requires_and_applies_operational_evidence(tmp_path):
     assert result.reports == []
 
 
-def test_harness_rejects_pre_market_without_official_same_day_operating_status(
+def test_harness_accepts_0730_pre_market_with_exact_previous_official_evidence(
     tmp_path,
 ):
-    import pytest
-
     observed = datetime(2026, 7, 20, 7, 30, tzinfo=ZoneInfo("Asia/Seoul"))
+    previous = date(2026, 7, 17)
+    fetched = datetime(2026, 7, 17, 20, 45, tzinfo=ZoneInfo("Asia/Seoul"))
+    nxt_fetched = observed - timedelta(minutes=1)
+    krx_url = "https://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_trd"
+    krx_id = "krx:daily:KOSPI:20260717:005930"
+    nxt_url = "https://www.nextrade.co.kr/menu/transactionStatusMain/menuList.do"
+    nxt_id = "nxt:price-snapshot:20260717:005930"
     candidate = Candidate(
         "005930",
         "삼성전자",
         [
             Signal(
-                SignalGroup.CATALYST, 40, "공시", "https://dart.fss.or.kr/a", observed
-            )
+                SignalGroup.PRICE_VOLUME,
+                25,
+                "전 거래일 KRX 등락률 +2.50%, 거래량 1,000,000주, "
+                "거래대금 100,000,000,000원",
+                krx_url,
+                fetched,
+                evidence_id=krx_id,
+            ),
+            Signal(
+                SignalGroup.CROSS_MARKET,
+                15,
+                "전 거래일 NXT 20분 지연 등락률 +1.50%, 거래량 150,000주, "
+                "거래대금 10,800,000,000원",
+                nxt_url,
+                nxt_fetched,
+                evidence_id=nxt_id,
+            ),
         ],
     )
+    price = EvidenceRecord(
+        source=EvidenceSource.KRX,
+        evidence_id=krx_id,
+        canonical_event_id=krx_id,
+        kind="daily-price",
+        company_name="삼성전자",
+        title="KRX 일별 시세",
+        source_url=krx_url,
+        published_date=previous,
+        fetched_at=fetched,
+        verification=VerificationStatus.OFFICIAL,
+        ticker="005930",
+        metrics={
+            "close": 71_000,
+            "change_rate": 2.5,
+            "volume": 1_000_000,
+            "trading_value": 100_000_000_000,
+            "market_cap": 500_000_000_000,
+        },
+        raw={"MKT_NM": "KOSPI"},
+    )
+    kind_id = "kind:listing-risk:2026-07-20:005930"
+    kind = EvidenceRecord(
+        source=EvidenceSource.KIND,
+        evidence_id=kind_id,
+        canonical_event_id=kind_id,
+        kind="listing-risk-status",
+        company_name="삼성전자",
+        title="KIND 투자유의 상태",
+        source_url="https://kind.krx.co.kr/investwarn/adminissue.do",
+        published_date=observed.date(),
+        fetched_at=observed,
+        verification=VerificationStatus.OFFICIAL,
+        ticker="005930",
+        metrics={
+            "administrative_issue": 0,
+            "trading_halt": 0,
+            "investment_warning": 0,
+        },
+    )
+    nxt = EvidenceRecord(
+        source=EvidenceSource.NXT,
+        evidence_id=nxt_id,
+        canonical_event_id=nxt_id,
+        kind="price-snapshot",
+        company_name="삼성전자",
+        title="NXT previous close",
+        source_url=nxt_url,
+        published_date=previous,
+        fetched_at=nxt_fetched,
+        verification=VerificationStatus.OFFICIAL,
+        ticker="005930",
+        delay_minutes=20,
+        metrics={
+            "change_rate": 1.5,
+            "volume": 150_000,
+            "trading_value": 10_800_000_000,
+            "source_as_of": "2026-07-17T20:05:00+09:00",
+        },
+    )
+    operational = {
+        "005930": OperationalEvidence(
+            "005930", price, ListingRisk("005930", observed.date(), kind)
+        )
+    }
 
-    with pytest.raises(ValueError, match="공식 KRX 당일 운영상태"):
+    result = ResearchHarness(calendar_bundle=calendar_bundle(observed)).run(
+        [candidate],
+        observed,
+        "pre-market",
+        tmp_path,
+        operational_evidence=operational,
+        previous_business_date=previous,
+        pre_market_nxt_evidence={"005930": nxt},
+    )
+
+    assert len(result.reports) == 1
+
+    import pytest
+
+    too_early = observed.replace(hour=6, minute=59)
+    with pytest.raises(ValueError, match="07:00-08:00 KST"):
+        ResearchHarness(calendar_bundle=calendar_bundle(too_early)).run(
+            [candidate],
+            too_early,
+            "pre-market",
+            tmp_path / "too-early",
+            operational_evidence=operational,
+            previous_business_date=previous,
+            pre_market_nxt_evidence={"005930": nxt},
+        )
+    with pytest.raises(ValueError, match="exact previous"):
         ResearchHarness(calendar_bundle=calendar_bundle(observed)).run(
             [candidate],
             observed,
             "pre-market",
-            tmp_path,
-            operational_evidence=operational_evidence(candidate),
+            tmp_path / "missing-previous",
+            operational_evidence=operational,
+            previous_business_date=None,
+            pre_market_nxt_evidence={"005930": nxt},
+        )
+    with pytest.raises(ValueError, match="previous NXT"):
+        ResearchHarness(calendar_bundle=calendar_bundle(observed)).run(
+            [candidate],
+            observed,
+            "pre-market",
+            tmp_path / "missing-nxt",
+            operational_evidence=operational,
+            previous_business_date=previous,
+            pre_market_nxt_evidence=None,
+        )
+    with pytest.raises(ValueError, match="invalid for pre-market"):
+        ResearchHarness(calendar_bundle=calendar_bundle(observed)).run(
+            [candidate],
+            observed,
+            "pre-market",
+            tmp_path / "cross-mode",
+            operational_evidence=operational,
+            previous_business_date=previous,
+            pre_market_nxt_evidence={"005930": nxt},
+            morning_nxt_evidence={},
         )
 
 
@@ -770,7 +903,7 @@ def test_harness_morning_mode_uses_previous_krx_price_and_same_day_kind(tmp_path
                 }
             ),
         )
-    with pytest.raises(ValueError, match="only valid for morning"):
+    with pytest.raises(ValueError, match="mode-specific evidence"):
         harness.run([candidate], observed, "post-market", tmp_path, **base_args)
 
     result = ResearchHarness(calendar_bundle=calendar_bundle(observed)).run(
