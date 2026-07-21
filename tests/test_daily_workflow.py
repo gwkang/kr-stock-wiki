@@ -4,11 +4,13 @@ import json
 import re
 from pathlib import Path
 
+import pytest
 import yaml
 
 
 ROOT = Path(__file__).parents[1]
 WORKFLOW = ROOT / ".github/workflows/daily-report.yml"
+MORNING_WORKFLOW = ROOT / ".github/workflows/morning-report.yml"
 WIKI_WORKFLOW = ROOT / ".github/workflows/wiki-sync.yml"
 WATCHLIST = ROOT / "config/watchlist.json"
 
@@ -22,6 +24,9 @@ def test_daily_report_workflow_runs_post_market_at_2045_kst_and_is_fail_closed()
     assert workflow["permissions"] == {"actions": "write", "contents": "write"}
     assert "KRX_API_KEY: ${{ secrets.KRX_API_KEY }}" in text
     assert "collect-calendar" in text
+    assert "calendar-next.json" in text
+    assert 'month_day="${BUSINESS_DATE:5:2}${BUSINESS_DATE:8:2}"' in text
+    assert '"${calendar_args[@]}"' in text
     assert "scheduled-open" in text
     assert "collect-krx" in text
     assert "collect-nxt" in text
@@ -46,8 +51,54 @@ def test_daily_report_workflow_runs_post_market_at_2045_kst_and_is_fail_closed()
     assert "examples/post-market-signals.json" not in text
 
 
-def test_daily_report_workflow_pins_every_external_action_to_commit_sha():
-    text = WORKFLOW.read_text(encoding="utf-8")
+def test_morning_workflow_runs_at_0925_kst_only_with_live_positive_evidence():
+    text = MORNING_WORKFLOW.read_text(encoding="utf-8")
+    workflow = yaml.load(text, Loader=yaml.BaseLoader)
+
+    assert workflow["on"]["schedule"] == [{"cron": "25 0 * * 1-5"}]
+    assert workflow["permissions"] == {"actions": "write", "contents": "write"}
+    assert "collect-calendar" in text
+    assert "if ((10#$month_day >= 1220))" in text
+    assert text.count('"${calendar_args[@]}"') == 3
+    assert "previous_business_date" in text
+    assert "collect-krx-live" in text
+    assert "collect-krx" in text
+    assert "collect-nxt" in text
+    assert text.count("build-morning-input") == 2
+    assert text.count("%6N") == 2
+    assert "collect-kind" in text
+    assert "--krx-live-snapshot build/evidence/krx-live.json" in text
+    assert text.count('--previous-business-date "$PREVIOUS_DATE"') == 3
+    assert (
+        text.count(
+            "PREVIOUS_DATE: ${{ steps.scheduled_open.outputs.previous_business_date }}"
+        )
+        == 3
+    )
+    assert "--krx-snapshot build/evidence/krx-previous.json" in text
+    assert "kr-stock-wiki run" in text
+    assert "kr-stock-wiki lint --wiki wiki" in text
+    assert "git add -- wiki" in text
+    assert '"Authorization: Bearer $GH_TOKEN"' in text
+    assert '"Authorization: Bearer ***"' not in text
+    assert "/actions/workflows/wiki-sync.yml/dispatches" in text
+    assert "official-snapshots-morning" in text
+    assert "07:30" not in text
+
+
+def test_research_workflows_share_publish_concurrency_group():
+    daily = yaml.load(WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    morning = yaml.load(
+        MORNING_WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader
+    )
+
+    assert daily["concurrency"]["group"] == "kr-stock-wiki-research-publish"
+    assert morning["concurrency"]["group"] == "kr-stock-wiki-research-publish"
+
+
+@pytest.mark.parametrize("workflow_path", [WORKFLOW, MORNING_WORKFLOW])
+def test_research_workflow_pins_every_external_action_to_commit_sha(workflow_path):
+    text = workflow_path.read_text(encoding="utf-8")
     uses = re.findall(r"uses:\s*([^\s#]+)", text)
 
     assert uses

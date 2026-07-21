@@ -1,5 +1,5 @@
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -15,6 +15,7 @@ from kr_stock_wiki.cli import (
 )
 from kr_stock_wiki.collectors.calendar import (
     CALENDAR_SOURCE_URL,
+    KrxCalendarBundle,
     KrxMarketCalendar,
     MarketHoliday,
 )
@@ -28,7 +29,31 @@ from kr_stock_wiki.collectors.market_notices import (
     KrxMarketNoticeSnapshot,
 )
 from kr_stock_wiki.collectors.krx import KrxDailySnapshot, KrxMarket
+from kr_stock_wiki.collectors.krx_live import (
+    KrxLiveActivitySnapshot,
+    KrxLiveMarketActivity,
+)
 from kr_stock_wiki.evidence import EvidenceRecord, EvidenceSource, VerificationStatus
+
+
+def _test_calendar(as_of: datetime) -> KrxMarketCalendar:
+    year = as_of.astimezone(ZoneInfo("Asia/Seoul")).year
+    days = [date(year, 1, day) for day in range(1, 10)] + [date(year, 12, 31)]
+    return KrxMarketCalendar(
+        year=year,
+        holidays=tuple(
+            MarketHoliday(day, day.strftime("%a").upper(), day.strftime("%A"), "test")
+            for day in days
+        ),
+        fetched_at=as_of - timedelta(minutes=1),
+    )
+
+
+def write_calendar(tmp_path: Path, as_of: datetime) -> Path:
+    snapshot = _test_calendar(as_of)
+    path = tmp_path / f"calendar-{snapshot.year}.json"
+    path.write_text(json.dumps(snapshot.to_payload()), encoding="utf-8")
+    return path
 
 
 def write_operational_snapshots(
@@ -184,6 +209,7 @@ def test_candidate_loader_rejects_untrusted_envelope(
 
 def test_cli_run_generates_wiki_from_json(tmp_path: Path):
     source = tmp_path / "signals.json"
+    observed = datetime(2026, 7, 20, 20, 30, tzinfo=ZoneInfo("Asia/Seoul"))
     source.write_text(
         json.dumps(
             {
@@ -222,6 +248,7 @@ def test_cli_run_generates_wiki_from_json(tmp_path: Path):
         business_date=date(2026, 7, 20),
         analysis_date=date(2026, 7, 20),
     )
+    calendar = write_calendar(tmp_path, observed)
 
     code = main(
         [
@@ -230,6 +257,8 @@ def test_cli_run_generates_wiki_from_json(tmp_path: Path):
             str(source),
             "--krx-snapshot",
             str(krx_snapshot),
+            "--calendar",
+            str(calendar),
             "--kind-status",
             str(kind_status),
             "--output",
@@ -611,6 +640,8 @@ def test_cli_reports_malformed_json_without_traceback(tmp_path: Path, capsys):
             str(source),
             "--krx-snapshot",
             str(tmp_path / "missing-krx.json"),
+            "--calendar",
+            str(tmp_path / "missing-calendar.json"),
             "--kind-status",
             str(tmp_path / "missing-kind.json"),
             "--output",
@@ -855,6 +886,8 @@ def test_cli_run_fails_closed_without_official_same_day_operating_status(
             str(source),
             "--krx-snapshot",
             str(tmp_path / "missing-krx.json"),
+            "--calendar",
+            str(tmp_path / "missing-calendar.json"),
             "--kind-status",
             str(tmp_path / "missing-kind.json"),
             "--output",
@@ -986,6 +1019,14 @@ def test_build_daily_input_writes_official_post_market_candidates(tmp_path: Path
         watchlist_path=watchlist,
         nxt_snapshot_path=nxt,
         krx_snapshot=_load_krx_snapshot(krx_path),
+        calendar_bundle=KrxCalendarBundle(
+            (
+                _test_calendar(
+                    datetime(2026, 7, 20, 20, 45, tzinfo=ZoneInfo("Asia/Seoul"))
+                ),
+            ),
+            datetime(2026, 7, 20, 20, 45, tzinfo=ZoneInfo("Asia/Seoul")),
+        ),
         observed=datetime(2026, 7, 20, 20, 45, tzinfo=ZoneInfo("Asia/Seoul")),
     )
 
@@ -997,6 +1038,14 @@ def test_build_daily_input_writes_official_post_market_candidates(tmp_path: Path
             watchlist_path=watchlist,
             nxt_snapshot_path=nxt,
             krx_snapshot=_load_krx_snapshot(krx_path),
+            calendar_bundle=KrxCalendarBundle(
+                (
+                    _test_calendar(
+                        datetime(2026, 7, 20, 20, 45, tzinfo=ZoneInfo("Asia/Seoul"))
+                    ),
+                ),
+                datetime(2026, 7, 20, 20, 45, tzinfo=ZoneInfo("Asia/Seoul")),
+            ),
             observed=datetime(2026, 7, 20, 20, 45, tzinfo=ZoneInfo("Asia/Seoul")),
         )
 
@@ -1027,3 +1076,195 @@ def test_build_daily_input_preserves_existing_output_on_validation_failure(
 
     assert code == 2
     assert json.loads(output.read_text(encoding="utf-8")) == {"preserved": True}
+
+
+def test_collect_krx_live_writes_same_day_market_activity(tmp_path: Path, monkeypatch):
+    observed = datetime(2026, 7, 21, 9, 25, tzinfo=ZoneInfo("Asia/Seoul"))
+    source_as_of = datetime(2026, 7, 21, 9, 24, tzinfo=ZoneInfo("Asia/Seoul"))
+    raw_rows = tuple(
+        tuple(
+            {
+                "TRD_DD": "20260721",
+                "DD_TP": "T_DD",
+                "INVST_TP": investor,
+                "ACC_BID_TRDVAL": "100",
+                "ACC_ASK_TRDVAL": "100",
+                "NETBID_TRDVAL": "0",
+            }.items()
+        )
+        for investor in ("기관(십억원)", "외국인(십억원)", "개인(십억원)")
+    )
+    snapshot = KrxLiveActivitySnapshot(
+        business_date=date(2026, 7, 21),
+        source_as_of=source_as_of,
+        fetched_at=observed,
+        activities=tuple(
+            KrxLiveMarketActivity(market, source_as_of, 600, raw_rows)
+            for market in (KrxMarket.KOSPI, KrxMarket.KOSDAQ)
+        ),
+    )
+    monkeypatch.setattr(
+        "kr_stock_wiki.cli.KrxLiveClient.current_activity",
+        lambda _client, business_date: (
+            snapshot if business_date == date(2026, 7, 21) else None
+        ),
+    )
+    output = tmp_path / "krx-live.json"
+
+    code = main(
+        [
+            "collect-krx-live",
+            "--date",
+            "2026-07-21",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert code == 0
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["source"] == "krx-live-market-activity"
+    assert payload["business_date"] == "2026-07-21"
+
+
+def test_candidate_loader_accepts_only_same_day_official_morning_envelope(
+    tmp_path: Path,
+):
+    source = tmp_path / "morning.json"
+    payload = {
+        "schema_version": 1,
+        "source": "official-morning-builder",
+        "as_of": "2026-07-21T09:25:00+09:00",
+        "business_date": "2026-07-21",
+        "mode": "morning",
+        "candidates": [],
+    }
+    source.write_text(json.dumps(payload), encoding="utf-8")
+
+    _observed, business_date, mode, source_name, _candidates = _load_candidates(source)
+
+    assert business_date == date(2026, 7, 21)
+    assert mode == "morning"
+    assert source_name == "official-morning-builder"
+
+    payload["source"] = "manual-research-input"
+    source.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="requires official morning"):
+        _load_candidates(source)
+
+
+def test_build_morning_input_cli_writes_canonical_official_artifact(tmp_path: Path):
+    kst = ZoneInfo("Asia/Seoul")
+    krx_path, _kind_path = write_operational_snapshots(
+        tmp_path,
+        business_date=date(2026, 7, 20),
+        analysis_date=date(2026, 7, 21),
+    )
+    krx_payload = json.loads(krx_path.read_text(encoding="utf-8"))
+    krx_payload["records"][0]["metrics"]["change_rate"] = 2.5
+    krx_path.write_text(json.dumps(krx_payload), encoding="utf-8")
+
+    watchlist = tmp_path / "watchlist.json"
+    watchlist.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source": "user-watchlist",
+                "stocks": [{"ticker": "005930", "name": "005930"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    nxt_id = "nxt:price-snapshot:20260721:005930"
+    nxt_record = EvidenceRecord(
+        source=EvidenceSource.NXT,
+        evidence_id=nxt_id,
+        canonical_event_id=nxt_id,
+        kind="price-snapshot",
+        company_name="005930",
+        title="NXT current price",
+        source_url="https://www.nextrade.co.kr/menu/transactionStatusMain/menuList.do",
+        published_date=date(2026, 7, 21),
+        fetched_at=datetime(2026, 7, 21, 9, 25, tzinfo=kst),
+        verification=VerificationStatus.OFFICIAL,
+        ticker="005930",
+        delay_minutes=20,
+        metrics={
+            "market": "KOSPI",
+            "current_price": 72_000,
+            "change_rate": 1.5,
+            "volume": 150_000,
+            "trading_value": 10_800_000_000,
+            "source_as_of": "2026-07-21T09:00:00+09:00",
+        },
+    )
+    nxt_path = tmp_path / "nxt.json"
+    nxt_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source": "nxt",
+                "collected_at": "2026-07-21T09:25:00+09:00",
+                "date": "2026-07-21",
+                "quote_delay_minutes": 20,
+                "records": [nxt_record.to_dict()],
+            }
+        ),
+        encoding="utf-8",
+    )
+    raw_rows = tuple(
+        tuple(
+            {
+                "TRD_DD": "20260721",
+                "DD_TP": "T_DD",
+                "INVST_TP": investor,
+                "ACC_BID_TRDVAL": "100",
+                "ACC_ASK_TRDVAL": "100",
+                "NETBID_TRDVAL": "0",
+            }.items()
+        )
+        for investor in ("기관(십억원)", "외국인(십억원)", "개인(십억원)")
+    )
+    live = KrxLiveActivitySnapshot(
+        date(2026, 7, 21),
+        datetime(2026, 7, 21, 9, 24, tzinfo=kst),
+        datetime(2026, 7, 21, 9, 25, tzinfo=kst),
+        tuple(
+            KrxLiveMarketActivity(
+                market, datetime(2026, 7, 21, 9, 24, tzinfo=kst), 600, raw_rows
+            )
+            for market in (KrxMarket.KOSPI, KrxMarket.KOSDAQ)
+        ),
+    )
+    live_path = tmp_path / "krx-live.json"
+    live_path.write_text(json.dumps(live.to_payload()), encoding="utf-8")
+    observed = datetime(2026, 7, 21, 9, 25, tzinfo=kst)
+    calendar = write_calendar(tmp_path, observed)
+    output = tmp_path / "morning.json"
+
+    code = main(
+        [
+            "build-morning-input",
+            "--watchlist",
+            str(watchlist),
+            "--krx-snapshot",
+            str(krx_path),
+            "--nxt-snapshot",
+            str(nxt_path),
+            "--krx-live-snapshot",
+            str(live_path),
+            "--calendar",
+            str(calendar),
+            "--previous-business-date",
+            "2026-07-20",
+            "--as-of",
+            "2026-07-21T09:25:00+09:00",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert code == 0
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["source"] == "official-morning-builder"
+    assert payload["candidates"][0]["ticker"] == "005930"

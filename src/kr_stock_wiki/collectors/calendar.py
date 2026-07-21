@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from http.cookiejar import CookieJar
 from typing import Callable
 from urllib.parse import urlencode, urlparse
@@ -12,11 +12,13 @@ from urllib.request import (
     Request,
     build_opener,
 )
+from zoneinfo import ZoneInfo
 
 
 CALENDAR_SOURCE_URL = (
     "https://global.krx.co.kr/contents/GLB/05/0501/0501110000/GLB0501110000.jsp"
 )
+_KST = ZoneInfo("Asia/Seoul")
 _BASE_URL = "https://global.krx.co.kr"
 _OTP_PATH = "/contents/COM/GenerateOTP.jspx"
 _DATA_PATH = "/contents/GLB/99/GLB99000001.jspx"
@@ -258,6 +260,47 @@ class KrxMarketCalendar:
             fetched_at=datetime.fromisoformat(str(payload["collected_at"])),
             source_url=str(payload["source_url"]),
         )
+
+
+@dataclass(frozen=True)
+class KrxCalendarBundle:
+    calendars: tuple[KrxMarketCalendar, ...]
+    as_of: datetime
+
+    def __post_init__(self) -> None:
+        if self.as_of.tzinfo is None or self.as_of.utcoffset() is None:
+            raise ValueError("calendar bundle as_of must include timezone")
+        years = [calendar.year for calendar in self.calendars]
+        if not years or years != sorted(years) or len(years) != len(set(years)):
+            raise ValueError("calendar bundle years must be sorted and unique")
+        if any(calendar.fetched_at > self.as_of for calendar in self.calendars):
+            raise ValueError("calendar bundle cannot contain future evidence")
+
+    def _calendar(self, year: int) -> KrxMarketCalendar:
+        for calendar in self.calendars:
+            if calendar.year == year:
+                return calendar
+        raise ValueError(f"official KRX calendar is missing for {year}")
+
+    def is_scheduled_trading_day(self, day: date) -> bool:
+        return self._calendar(day.year).is_scheduled_trading_day(day)
+
+    def previous_business_date(self, day: date) -> date:
+        candidate = day - timedelta(days=1)
+        while not self.is_scheduled_trading_day(candidate):
+            candidate -= timedelta(days=1)
+        return candidate
+
+    def add_trading_days(self, start: datetime, days: int) -> datetime:
+        if days < 0:
+            raise ValueError("trading days must be non-negative")
+        current = start
+        remaining = days
+        while remaining:
+            current += timedelta(days=1)
+            if self.is_scheduled_trading_day(current.astimezone(_KST).date()):
+                remaining -= 1
+        return current
 
 
 @dataclass

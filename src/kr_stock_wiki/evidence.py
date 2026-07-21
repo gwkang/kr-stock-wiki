@@ -90,6 +90,10 @@ class EvidenceRecord:
         )
 
     def __post_init__(self) -> None:
+        if not isinstance(self.is_correction, bool) or not isinstance(
+            self.is_withdrawn, bool
+        ):
+            raise ValueError("correction and withdrawal flags must be booleans")
         if self.fetched_at.tzinfo is None or self.fetched_at.utcoffset() is None:
             raise ValueError("fetched_at must include a timezone")
         parsed = urlparse(self.source_url)

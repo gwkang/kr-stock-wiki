@@ -1,15 +1,18 @@
 import json
-from datetime import date, datetime
+from dataclasses import replace
+from datetime import date, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
 import kr_stock_wiki.collectors.calendar as calendar_module
 import pytest
 from kr_stock_wiki.collectors.calendar import (
+    KrxCalendarBundle,
     KrxCalendarClient,
     KrxCalendarResponseError,
     KrxCalendarTransportError,
     KrxMarketCalendar,
+    MarketHoliday,
 )
 
 
@@ -276,3 +279,95 @@ def test_calendar_artifact_rejects_raw_normalization_tampering():
 
     with pytest.raises(ValueError, match="raw fields"):
         KrxMarketCalendar.from_payload(payload)
+
+
+def _bundle_calendar(year: int, fetched_at: datetime) -> KrxMarketCalendar:
+    days = [date(year, 1, day) for day in range(1, 10)] + [date(year, 12, 31)]
+    codes = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
+    names = (
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+    )
+    return KrxMarketCalendar(
+        year,
+        tuple(
+            MarketHoliday(day, codes[day.weekday()], names[day.weekday()], "test")
+            for day in days
+        ),
+        fetched_at,
+    )
+
+
+def test_calendar_bundle_computes_exact_previous_date_and_expiry():
+    as_of = datetime(2026, 7, 21, 9, 25, tzinfo=ZoneInfo("Asia/Seoul"))
+    bundle = KrxCalendarBundle(
+        (_bundle_calendar(2026, as_of - timedelta(minutes=1)),), as_of
+    )
+
+    assert bundle.previous_business_date(date(2026, 7, 21)) == date(2026, 7, 20)
+    assert bundle.add_trading_days(as_of, 5).date() == date(2026, 7, 28)
+
+
+def test_calendar_bundle_uses_kst_date_for_aware_non_kst_input():
+    start = datetime(2026, 7, 19, 15, 30, tzinfo=ZoneInfo("UTC"))
+    bundle = KrxCalendarBundle(
+        (_bundle_calendar(2026, start - timedelta(minutes=1)),), start
+    )
+
+    result = bundle.add_trading_days(start, 5)
+
+    assert result.astimezone(ZoneInfo("Asia/Seoul")) == datetime(
+        2026, 7, 27, 0, 30, tzinfo=ZoneInfo("Asia/Seoul")
+    )
+
+
+def test_calendar_bundle_fails_closed_on_missing_year_coverage():
+    as_of = datetime(2026, 12, 29, 20, 45, tzinfo=ZoneInfo("Asia/Seoul"))
+    bundle = KrxCalendarBundle(
+        (_bundle_calendar(2026, as_of - timedelta(minutes=1)),), as_of
+    )
+
+    with pytest.raises(ValueError, match="missing for 2027"):
+        bundle.add_trading_days(as_of, 5)
+
+
+def test_calendar_bundle_rejects_duplicate_year_and_future_collection():
+    as_of = datetime(2026, 7, 21, 9, 25, tzinfo=ZoneInfo("Asia/Seoul"))
+    calendar = _bundle_calendar(2026, as_of - timedelta(minutes=1))
+    with pytest.raises(ValueError, match="sorted and unique"):
+        KrxCalendarBundle((calendar, calendar), as_of)
+    with pytest.raises(ValueError, match="future evidence"):
+        KrxCalendarBundle(
+            (_bundle_calendar(2026, as_of + timedelta(seconds=1)),), as_of
+        )
+
+
+def test_calendar_bundle_rejects_naive_time_and_negative_lookahead():
+    as_of = datetime(2026, 7, 20, 9, 25, tzinfo=ZoneInfo("Asia/Seoul"))
+    calendar = _bundle_calendar(2026, as_of - timedelta(minutes=1))
+    with pytest.raises(ValueError, match="timezone"):
+        KrxCalendarBundle((calendar,), as_of.replace(tzinfo=None))
+    bundle = KrxCalendarBundle((calendar,), as_of)
+    with pytest.raises(ValueError, match="non-negative"):
+        bundle.add_trading_days(as_of, -1)
+    assert bundle.previous_business_date(date(2026, 7, 20)) == date(2026, 7, 17)
+
+
+def test_market_calendar_rejects_invalid_artifact_invariants():
+    as_of = datetime(2026, 7, 20, 9, 25, tzinfo=ZoneInfo("Asia/Seoul"))
+    calendar = _bundle_calendar(2026, as_of - timedelta(minutes=1))
+    with pytest.raises(ValueError, match="timezone-aware"):
+        replace(calendar, fetched_at=calendar.fetched_at.replace(tzinfo=None))
+    with pytest.raises(ValueError, match="different year"):
+        replace(calendar, year=2025)
+    with pytest.raises(ValueError, match="sorted and unique"):
+        replace(calendar, holidays=tuple(reversed(calendar.holidays)))
+    with pytest.raises(ValueError, match="completeness"):
+        replace(calendar, holidays=calendar.holidays[:2])
+    with pytest.raises(ValueError, match="outside"):
+        calendar.is_scheduled_trading_day(date(2025, 12, 31))

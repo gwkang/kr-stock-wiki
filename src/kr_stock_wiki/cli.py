@@ -11,15 +11,20 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from .collectors.calendar import KrxCalendarClient
+from .collectors.calendar import (
+    KrxCalendarBundle,
+    KrxCalendarClient,
+    KrxMarketCalendar,
+)
 from .collectors.dart import DartClient
 from .collectors.kind import KindClient
 from .collectors.kind_market_notices import KindMarketNoticeClient
 from .collectors.krx import KrxClient, KrxDailySnapshot
+from .collectors.krx_live import KrxLiveActivitySnapshot, KrxLiveClient
 from .collectors.market_notices import KrxMarketNoticeClient
 from .collectors.news import NewsFeed, YonhapRssClient
 from .collectors.nxt import NxtClient
-from .daily import build_post_market_input
+from .daily import build_morning_input, build_post_market_input
 from .evidence import EvidenceRecord
 from .harness import ResearchHarness
 from .market_rules import (
@@ -55,7 +60,11 @@ def _load_candidates(
         "mode",
         "candidates",
     }
-    allowed_sources = {"manual-research-input", "official-post-market-builder"}
+    allowed_sources = {
+        "manual-research-input",
+        "official-post-market-builder",
+        "official-morning-builder",
+    }
     if (
         not isinstance(data, dict)
         or set(data) != envelope_fields
@@ -71,12 +80,20 @@ def _load_candidates(
         raise ValueError("as_of must include a timezone")
     analysis_date = observed.astimezone(_KST).date()
     mode = data["mode"]
-    if mode not in {"pre-market", "post-market"}:
-        raise ValueError("mode must be pre-market or post-market")
-    if mode == "post-market" and business_date != analysis_date:
-        raise ValueError("post-market business_date must match the KST analysis date")
+    if mode not in {"pre-market", "morning", "post-market"}:
+        raise ValueError("mode must be pre-market, morning, or post-market")
+    if mode in {"morning", "post-market"} and business_date != analysis_date:
+        raise ValueError(f"{mode} business_date must match the KST analysis date")
     if mode == "pre-market" and business_date >= analysis_date:
         raise ValueError("pre-market business_date must precede the KST analysis date")
+    expected_official_modes = {
+        "official-post-market-builder": "post-market",
+        "official-morning-builder": "morning",
+    }
+    if source in expected_official_modes and mode != expected_official_modes[source]:
+        raise ValueError("official candidate source and mode are inconsistent")
+    if mode == "morning" and source != "official-morning-builder":
+        raise ValueError("morning mode requires official morning candidate input")
     candidates = []
     for item in data["candidates"]:
         if (
@@ -131,11 +148,31 @@ def _load_candidates(
     return observed, business_date, mode, source, candidates
 
 
+def _load_calendar_bundle(paths: list[Path], as_of: datetime) -> KrxCalendarBundle:
+    calendars = tuple(
+        sorted(
+            (
+                KrxMarketCalendar.from_payload(
+                    json.loads(path.read_text(encoding="utf-8"))
+                )
+                for path in paths
+            ),
+            key=lambda item: item.year,
+        )
+    )
+    return KrxCalendarBundle(calendars, as_of)
+
+
 def _load_krx_snapshot(path: Path) -> KrxDailySnapshot:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("KRX snapshot must be a JSON object")
     return KrxDailySnapshot.from_payload(payload)
+
+
+def _load_krx_live_snapshot(path: Path) -> KrxLiveActivitySnapshot:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return KrxLiveActivitySnapshot.from_payload(payload)
 
 
 def _verify_official_candidate_input(
@@ -144,12 +181,36 @@ def _verify_official_candidate_input(
     watchlist_path: Path,
     nxt_snapshot_path: Path,
     krx_snapshot: KrxDailySnapshot,
+    calendar_bundle: KrxCalendarBundle,
     observed: datetime,
+    krx_live_path: Path | None = None,
+    previous_business_date: date | None = None,
 ) -> None:
     actual = json.loads(candidate_path.read_text(encoding="utf-8"))
     watchlist = json.loads(watchlist_path.read_text(encoding="utf-8"))
     nxt_snapshot = json.loads(nxt_snapshot_path.read_text(encoding="utf-8"))
-    expected = build_post_market_input(watchlist, krx_snapshot, nxt_snapshot, observed)
+    if isinstance(actual, dict) and actual.get("source") == "official-morning-builder":
+        if krx_live_path is None or previous_business_date is None:
+            raise ValueError(
+                "official morning input requires KRX live snapshot and previous date"
+            )
+        expected = build_morning_input(
+            watchlist,
+            krx_snapshot,
+            nxt_snapshot,
+            _load_krx_live_snapshot(krx_live_path),
+            calendar_bundle,
+            previous_business_date,
+            observed,
+        )
+    elif krx_live_path is not None or previous_business_date is not None:
+        raise ValueError(
+            "KRX live snapshot and previous date are only valid for morning"
+        )
+    else:
+        expected = build_post_market_input(
+            watchlist, krx_snapshot, nxt_snapshot, observed
+        )
     if actual != expected:
         raise ValueError("official candidate input does not match source snapshots")
 
@@ -235,15 +296,28 @@ def _operational_evidence(
     business_date: date,
     krx_snapshot: KrxDailySnapshot,
     listing_risks: dict[str, ListingRisk],
+    mode: str = "post-market",
+    previous_business_date: date | None = None,
 ) -> dict[str, OperationalEvidence]:
-    if krx_snapshot.business_date != business_date:
-        raise ValueError("KRX snapshot date must match candidate business_date")
-    if (
-        krx_snapshot.fetched_at > observed
-        or observed - krx_snapshot.fetched_at > timedelta(hours=12)
+    if mode == "morning":
+        if (
+            previous_business_date is None
+            or krx_snapshot.business_date != previous_business_date
+            or previous_business_date >= business_date
+        ):
+            raise ValueError("morning KRX snapshot must match exact previous date")
+        maximum_age = None
+    else:
+        if krx_snapshot.business_date != business_date:
+            raise ValueError("KRX snapshot date must match candidate business_date")
+        maximum_age = timedelta(hours=12)
+    if krx_snapshot.fetched_at > observed or (
+        maximum_age is not None and observed - krx_snapshot.fetched_at > maximum_age
     ):
+        if mode == "morning":
+            raise ValueError("morning KRX snapshot timestamp is invalid")
         raise ValueError("KRX snapshot must be fetched within 12 hours before analysis")
-    market_day = TradingDayGate().assess(business_date, krx_snapshot)
+    market_day = TradingDayGate().assess(krx_snapshot.business_date, krx_snapshot)
     if market_day.status is not MarketDayStatus.OPEN:
         raise ValueError(f"KRX 거래일 확인 실패: {market_day.reason}")
     prices: dict[str, EvidenceRecord] = {}
@@ -304,8 +378,11 @@ def build_parser() -> argparse.ArgumentParser:
     run = commands.add_parser("run", help="JSON 신호 입력으로 Wiki 리포트를 생성합니다")
     run.add_argument("--input", required=True, type=Path)
     run.add_argument("--krx-snapshot", required=True, type=Path)
+    run.add_argument("--calendar", required=True, action="append", type=Path)
     run.add_argument("--watchlist", type=Path)
     run.add_argument("--nxt-snapshot", type=Path)
+    run.add_argument("--krx-live-snapshot", type=Path)
+    run.add_argument("--previous-business-date", type=date.fromisoformat)
     run.add_argument("--kind-status", required=True, type=Path)
     run.add_argument("--output", required=True, type=Path)
     daily = commands.add_parser(
@@ -317,6 +394,20 @@ def build_parser() -> argparse.ArgumentParser:
     daily.add_argument("--nxt-snapshot", required=True, type=Path)
     daily.add_argument("--as-of", required=True, type=datetime.fromisoformat)
     daily.add_argument("--output", required=True, type=Path)
+    morning = commands.add_parser(
+        "build-morning-input",
+        help="공식 전일 KRX·당일 NXT·KRX live 근거에서 오전 후보 입력을 생성합니다",
+    )
+    morning.add_argument("--watchlist", required=True, type=Path)
+    morning.add_argument("--krx-snapshot", required=True, type=Path)
+    morning.add_argument("--nxt-snapshot", required=True, type=Path)
+    morning.add_argument("--krx-live-snapshot", required=True, type=Path)
+    morning.add_argument("--calendar", required=True, action="append", type=Path)
+    morning.add_argument(
+        "--previous-business-date", required=True, type=date.fromisoformat
+    )
+    morning.add_argument("--as-of", required=True, type=datetime.fromisoformat)
+    morning.add_argument("--output", required=True, type=Path)
     lint = commands.add_parser("lint", help="Wiki 무결성을 검사합니다")
     lint.add_argument("--wiki", required=True, type=Path)
     dart = commands.add_parser(
@@ -331,6 +422,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     krx.add_argument("--date", required=True, type=date.fromisoformat)
     krx.add_argument("--output", required=True, type=Path)
+    krx_live = commands.add_parser(
+        "collect-krx-live",
+        help="KRX 공식 메인 화면에서 당일 KOSPI·KOSDAQ 실거래 activity를 수집합니다",
+    )
+    krx_live.add_argument("--date", required=True, type=date.fromisoformat)
+    krx_live.add_argument("--output", required=True, type=Path)
     calendar = commands.add_parser(
         "collect-calendar", help="Global KRX 공식 연간 휴장일 캘린더를 수집합니다"
     )
@@ -371,6 +468,34 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "build-morning-input":
+        try:
+            watchlist = json.loads(args.watchlist.read_text(encoding="utf-8"))
+            krx_snapshot = _load_krx_snapshot(args.krx_snapshot)
+            nxt_snapshot = json.loads(args.nxt_snapshot.read_text(encoding="utf-8"))
+            krx_live_snapshot = _load_krx_live_snapshot(args.krx_live_snapshot)
+            calendar_bundle = _load_calendar_bundle(args.calendar, args.as_of)
+            payload = build_morning_input(
+                watchlist,
+                krx_snapshot,
+                nxt_snapshot,
+                krx_live_snapshot,
+                calendar_bundle,
+                args.previous_business_date,
+                args.as_of,
+            )
+            _write_json_atomic(args.output, payload)
+        except (
+            OSError,
+            ValueError,
+            KeyError,
+            TypeError,
+            json.JSONDecodeError,
+        ) as error:
+            print(f"오전 후보 입력 생성 오류: {error}", file=sys.stderr)
+            return 2
+        print(f"candidates={len(payload['candidates'])} output={args.output}")
+        return 0
     if args.command == "build-daily-input":
         try:
             watchlist = json.loads(args.watchlist.read_text(encoding="utf-8"))
@@ -401,25 +526,49 @@ def main(argv: list[str] | None = None) -> int:
                     "pre-market 실행에는 캘린더 외에 공식 KRX 당일 운영상태 근거가 필요합니다"
                 )
             krx_snapshot = _load_krx_snapshot(args.krx_snapshot)
+            calendar_bundle = _load_calendar_bundle(args.calendar, observed)
             has_watchlist = args.watchlist is not None
             has_nxt_snapshot = args.nxt_snapshot is not None
+            has_krx_live = args.krx_live_snapshot is not None
+            has_previous_date = args.previous_business_date is not None
             if has_watchlist != has_nxt_snapshot:
                 raise ValueError("watchlist and NXT snapshot must be provided together")
             if has_watchlist:
-                if source != "official-post-market-builder":
+                if source not in {
+                    "official-post-market-builder",
+                    "official-morning-builder",
+                }:
                     raise ValueError(
                         "source snapshots require official candidate input"
+                    )
+                is_morning_source = source == "official-morning-builder"
+                if (
+                    is_morning_source != has_krx_live
+                    or is_morning_source != has_previous_date
+                ):
+                    raise ValueError(
+                        "official morning input requires KRX live snapshot and previous date"
                     )
                 _verify_official_candidate_input(
                     args.input,
                     watchlist_path=args.watchlist,
                     nxt_snapshot_path=args.nxt_snapshot,
                     krx_snapshot=krx_snapshot,
+                    calendar_bundle=calendar_bundle,
                     observed=observed,
+                    krx_live_path=args.krx_live_snapshot,
+                    previous_business_date=args.previous_business_date,
                 )
-            elif source == "official-post-market-builder":
+            elif source in {
+                "official-post-market-builder",
+                "official-morning-builder",
+            }:
                 raise ValueError(
                     "official candidate input requires watchlist and NXT snapshot"
+                )
+            elif has_krx_live or has_previous_date:
+                raise ValueError(
+                    "KRX live snapshot and previous date require official morning input"
                 )
             listing_risks = _load_listing_risks(
                 args.kind_status,
@@ -432,18 +581,59 @@ def main(argv: list[str] | None = None) -> int:
                 business_date=business_date,
                 krx_snapshot=krx_snapshot,
                 listing_risks=listing_risks,
+                mode=mode,
+                previous_business_date=args.previous_business_date,
             )
-            result = ResearchHarness().run(
+            morning_live_snapshot = None
+            morning_nxt_evidence = None
+            if mode == "morning":
+                if args.krx_live_snapshot is None or args.nxt_snapshot is None:
+                    raise ValueError("morning official artifacts are required")
+                morning_live_snapshot = _load_krx_live_snapshot(args.krx_live_snapshot)
+                nxt_payload = json.loads(args.nxt_snapshot.read_text(encoding="utf-8"))
+                cross_tickers = {
+                    candidate.ticker
+                    for candidate in candidates
+                    if any(
+                        signal.group is SignalGroup.CROSS_MARKET
+                        for signal in candidate.signals
+                    )
+                }
+                matching_records = [
+                    EvidenceRecord.from_dict(item)
+                    for item in nxt_payload["records"]
+                    if item.get("ticker") in cross_tickers
+                ]
+                morning_nxt_evidence = {
+                    record.ticker: record
+                    for record in matching_records
+                    if record.ticker is not None
+                }
+                if len(morning_nxt_evidence) != len(matching_records):
+                    raise ValueError("duplicate morning NXT ticker evidence")
+            result = ResearchHarness(calendar_bundle=calendar_bundle).run(
                 candidates,
                 observed,
                 mode,
                 args.output,
                 operational_evidence=operational_evidence,
+                previous_business_date=args.previous_business_date,
+                morning_krx_live_snapshot=morning_live_snapshot,
+                morning_nxt_evidence=morning_nxt_evidence,
             )
         except (OSError, ValueError, KeyError, TypeError) as error:
             print(f"입력 오류: {error}", file=sys.stderr)
             return 2
         print(f"generated={len(result.reports)} index={result.index_path}")
+        return 0
+    if args.command == "collect-krx-live":
+        try:
+            snapshot = KrxLiveClient().current_activity(args.date)
+            _write_json_atomic(args.output, snapshot.to_payload())
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            print(f"KRX 당일 실거래 activity 수집 오류: {error}", file=sys.stderr)
+            return 2
+        print(f"collected={len(snapshot.activities)} output={args.output}")
         return 0
     if args.command == "collect-kind-market-notice":
         try:

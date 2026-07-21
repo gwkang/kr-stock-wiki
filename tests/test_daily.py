@@ -5,14 +5,49 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from kr_stock_wiki.collectors.calendar import (
+    KrxCalendarBundle,
+    KrxMarketCalendar,
+    MarketHoliday,
+)
 from kr_stock_wiki.collectors.krx import KrxDailySnapshot, KrxMarket
-from kr_stock_wiki.daily import build_post_market_input
+from kr_stock_wiki.collectors.krx_live import (
+    KrxLiveActivitySnapshot,
+    KrxLiveMarketActivity,
+)
+from kr_stock_wiki.daily import build_morning_input, build_post_market_input
 from kr_stock_wiki.evidence import EvidenceRecord, EvidenceSource, VerificationStatus
 
 
 KST = ZoneInfo("Asia/Seoul")
 BUSINESS_DATE = date(2026, 7, 20)
 AS_OF = datetime(2026, 7, 20, 20, 45, tzinfo=KST)
+_WEEKDAY_CODES = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
+_WEEKDAY_NAMES = (
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+)
+
+
+def calendar_bundle(as_of: datetime) -> KrxCalendarBundle:
+    year = as_of.astimezone(KST).year
+    days = [date(year, 1, day) for day in range(1, 10)] + [date(year, 12, 31)]
+    holidays = tuple(
+        MarketHoliday(
+            day,
+            _WEEKDAY_CODES[day.weekday()],
+            _WEEKDAY_NAMES[day.weekday()],
+            "test",
+        )
+        for day in days
+    )
+    calendar = KrxMarketCalendar(year, holidays, as_of - timedelta(minutes=1))
+    return KrxCalendarBundle((calendar,), as_of)
 
 
 def price_record(
@@ -332,4 +367,168 @@ def test_build_post_market_input_limits_watchlist_to_twenty_stocks():
             krx_snapshot(price_record()),
             nxt_payload(price_record(source=EvidenceSource.NXT)),
             AS_OF,
+        )
+
+
+def _morning_nxt_payload(*records: EvidenceRecord) -> dict[str, object]:
+    collected_at = max(record.fetched_at for record in records)
+    return {
+        "schema_version": 1,
+        "source": "nxt",
+        "collected_at": collected_at.isoformat(),
+        "date": "2026-07-21",
+        "quote_delay_minutes": 20,
+        "records": [record.to_dict() for record in records],
+    }
+
+
+def _morning_nxt_record(
+    *,
+    ticker: str = "005930",
+    name: str = "삼성전자",
+    volume: int = 150_000,
+    trading_value: int = 10_800_000_000,
+) -> EvidenceRecord:
+    fetched_at = datetime(2026, 7, 21, 9, 25, tzinfo=KST)
+    evidence_id = f"nxt:price-snapshot:20260721:{ticker}"
+    return EvidenceRecord(
+        source=EvidenceSource.NXT,
+        evidence_id=evidence_id,
+        canonical_event_id=evidence_id,
+        kind="price-snapshot",
+        company_name=name,
+        title=f"{name} NXT 현재가 스냅샷",
+        source_url="https://www.nextrade.co.kr/menu/transactionStatusMain/menuList.do",
+        published_date=date(2026, 7, 21),
+        fetched_at=fetched_at,
+        verification=VerificationStatus.OFFICIAL,
+        ticker=ticker,
+        delay_minutes=20,
+        metrics={
+            "market": "KOSPI",
+            "current_price": 72_000,
+            "change_rate": 1.5,
+            "volume": volume,
+            "trading_value": trading_value,
+            "source_as_of": "2026-07-21T09:00:00+09:00",
+        },
+        raw={"setTime": "2026-07-21 09:00"},
+    )
+
+
+def _live_snapshot() -> KrxLiveActivitySnapshot:
+    source_as_of = datetime(2026, 7, 21, 9, 24, tzinfo=KST)
+    raw_rows = tuple(
+        tuple(
+            {
+                "TRD_DD": "20260721",
+                "DD_TP": "T_DD",
+                "INVST_TP": investor,
+                "ACC_BID_TRDVAL": "100",
+                "ACC_ASK_TRDVAL": "100",
+                "NETBID_TRDVAL": "0",
+            }.items()
+        )
+        for investor in ("기관(십억원)", "외국인(십억원)", "개인(십억원)")
+    )
+    return KrxLiveActivitySnapshot(
+        business_date=date(2026, 7, 21),
+        source_as_of=source_as_of,
+        fetched_at=datetime(2026, 7, 21, 9, 25, tzinfo=KST),
+        activities=tuple(
+            KrxLiveMarketActivity(market, source_as_of, 600, raw_rows)
+            for market in (KrxMarket.KOSPI, KrxMarket.KOSDAQ)
+        ),
+    )
+
+
+def test_build_morning_input_requires_live_krx_and_current_nxt_evidence():
+    as_of = datetime(2026, 7, 21, 9, 25, tzinfo=KST)
+    krx = price_record(fetched_at=datetime(2026, 7, 20, 20, 45, tzinfo=KST))
+    nxt = _morning_nxt_record()
+
+    payload = build_morning_input(
+        watchlist(("005930", "삼성전자")),
+        krx_snapshot(krx),
+        _morning_nxt_payload(nxt),
+        _live_snapshot(),
+        calendar_bundle(as_of),
+        date(2026, 7, 20),
+        as_of,
+    )
+
+    assert payload["source"] == "official-morning-builder"
+    assert payload["mode"] == "morning"
+    assert payload["business_date"] == "2026-07-21"
+    assert [signal["group"] for signal in payload["candidates"][0]["signals"]] == [
+        "price-volume",
+        "cross-market",
+    ]
+
+
+def test_build_morning_input_rejects_nxt_before_delayed_main_market_evidence():
+    as_of = datetime(2026, 7, 21, 9, 25, tzinfo=KST)
+    nxt = _morning_nxt_record()
+    nxt.metrics["source_as_of"] = "2026-07-21T08:59:00+09:00"
+
+    with pytest.raises(ValueError, match="09:00 KST"):
+        build_morning_input(
+            watchlist(("005930", "삼성전자")),
+            krx_snapshot(
+                price_record(fetched_at=datetime(2026, 7, 20, 20, 45, tzinfo=KST))
+            ),
+            _morning_nxt_payload(nxt),
+            _live_snapshot(),
+            calendar_bundle(as_of),
+            date(2026, 7, 20),
+            as_of,
+        )
+
+
+def test_build_morning_input_does_not_use_zero_trade_quote_as_cross_market():
+    as_of = datetime(2026, 7, 21, 9, 25, tzinfo=KST)
+    zero_candidate = _morning_nxt_record(volume=0, trading_value=0)
+    unrelated_positive = _morning_nxt_record(ticker="000660", name="SK하이닉스")
+
+    payload = build_morning_input(
+        watchlist(("005930", "삼성전자")),
+        krx_snapshot(
+            price_record(fetched_at=datetime(2026, 7, 20, 20, 45, tzinfo=KST))
+        ),
+        _morning_nxt_payload(zero_candidate, unrelated_positive),
+        _live_snapshot(),
+        calendar_bundle(as_of),
+        date(2026, 7, 20),
+        as_of,
+    )
+
+    assert [signal["group"] for signal in payload["candidates"][0]["signals"]] == [
+        "price-volume"
+    ]
+
+
+def test_build_morning_input_requires_exact_calendar_previous_business_date():
+    as_of = datetime(2026, 7, 21, 9, 25, tzinfo=KST)
+    stale_record = price_record(
+        published_date=date(2026, 7, 17),
+        fetched_at=datetime(2026, 7, 17, 20, 45, tzinfo=KST),
+    )
+    stale_snapshot = KrxDailySnapshot(
+        business_date=date(2026, 7, 17),
+        requested_markets=(KrxMarket.KOSPI,),
+        completed_markets=(KrxMarket.KOSPI,),
+        record_counts=((KrxMarket.KOSPI, 1),),
+        records=(stale_record,),
+        fetched_at=stale_record.fetched_at,
+    )
+
+    with pytest.raises(ValueError, match="official calendar"):
+        build_morning_input(
+            watchlist(("005930", "삼성전자")),
+            stale_snapshot,
+            _morning_nxt_payload(_morning_nxt_record()),
+            _live_snapshot(),
+            calendar_bundle(as_of),
+            date(2026, 7, 17),
+            as_of,
         )

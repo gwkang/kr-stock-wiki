@@ -1,19 +1,24 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+import math
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
+from typing import cast
 from zoneinfo import ZoneInfo
 
 import yaml
 
 from .agents import DEFAULT_AGENTS
+from .collectors.calendar import KrxCalendarBundle
+from .collectors.krx_live import KrxLiveActivitySnapshot
+from .evidence import EvidenceRecord, EvidenceSource, VerificationStatus
 from .market_rules import (
     OperationalDecision,
     OperationalEvidence,
     OperationalFilter,
     apply_operational_decision,
 )
-from .models import Candidate, HarnessResult, StockReport
+from .models import Candidate, HarnessResult, Signal, SignalGroup, StockReport
 from .scanner import BalancedRanker
 
 
@@ -30,6 +35,67 @@ def add_trading_days(
         if current.weekday() < 5 and current.date() not in holidays:
             remaining -= 1
     return current
+
+
+def _validate_morning_krx_signal(
+    candidate: Candidate,
+    signal: Signal,
+    price: EvidenceRecord,
+    previous_business_date: date,
+) -> None:
+    expected_ids = {
+        (
+            f"krx:daily:KOSPI:{previous_business_date:%Y%m%d}:{candidate.ticker}",
+            "https://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_trd",
+        ),
+        (
+            f"krx:daily:KOSDAQ:{previous_business_date:%Y%m%d}:{candidate.ticker}",
+            "https://data-dbg.krx.co.kr/svc/apis/sto/ksq_bydd_trd",
+        ),
+    }
+    change_rate = price.metrics.get("change_rate")
+    volume = price.metrics.get("volume")
+    trading_value = price.metrics.get("trading_value")
+    metrics_invalid = (
+        isinstance(change_rate, bool)
+        or not isinstance(change_rate, (int, float))
+        or not math.isfinite(float(change_rate))
+        or isinstance(volume, bool)
+        or not isinstance(volume, int)
+        or volume < 0
+        or isinstance(trading_value, bool)
+        or not isinstance(trading_value, int)
+        or trading_value < 0
+    )
+    if metrics_invalid:
+        raise ValueError("invalid official morning KRX signal provenance")
+    rate = float(cast(int | float, change_rate))
+    volume = cast(int, volume)
+    trading_value = cast(int, trading_value)
+    expected_reason = (
+        f"전 거래일 KRX 등락률 {rate:+.2f}%, 거래량 {volume:,}주, "
+        f"거래대금 {trading_value:,}원"
+    )
+    if (
+        (price.evidence_id, price.source_url) not in expected_ids
+        or price.source is not EvidenceSource.KRX
+        or price.canonical_event_id != price.evidence_id
+        or price.is_correction
+        or price.is_withdrawn
+        or price.verification is not VerificationStatus.OFFICIAL
+        or price.kind != "daily-price"
+        or price.ticker != candidate.ticker
+        or price.company_name != candidate.name
+        or price.published_date != previous_business_date
+        or price.delay_minutes is not None
+        or signal.group is not SignalGroup.PRICE_VOLUME
+        or signal.evidence_id != price.evidence_id
+        or signal.source_url != price.source_url
+        or signal.observed_at != price.fetched_at
+        or signal.score != min(100.0, abs(rate) * 10.0)
+        or signal.reason != expected_reason
+    ):
+        raise ValueError("invalid official morning KRX signal provenance")
 
 
 def _markdown_text(value: str) -> str:
@@ -128,11 +194,12 @@ def _report_markdown(report: StockReport, mode: str) -> str:
 class ResearchHarness:
     def __init__(
         self,
+        *,
+        calendar_bundle: KrxCalendarBundle,
         ranker: BalancedRanker | None = None,
-        holidays: set[date] | frozenset[date] | None = None,
     ):
         self.ranker = ranker or BalancedRanker(minimum_score=20)
-        self.holidays = frozenset(holidays or ())
+        self.calendar_bundle = calendar_bundle
 
     def run(
         self,
@@ -142,9 +209,12 @@ class ResearchHarness:
         output_dir: Path,
         *,
         operational_evidence: dict[str, OperationalEvidence],
+        previous_business_date: date | None = None,
+        morning_krx_live_snapshot: KrxLiveActivitySnapshot | None = None,
+        morning_nxt_evidence: dict[str, EvidenceRecord] | None = None,
     ) -> HarnessResult:
-        if mode not in {"pre-market", "post-market"}:
-            raise ValueError("mode must be pre-market or post-market")
+        if mode not in {"pre-market", "morning", "post-market"}:
+            raise ValueError("mode must be pre-market, morning, or post-market")
         if observed_at.tzinfo is None or observed_at.utcoffset() is None:
             raise ValueError("observed_at must include a timezone")
         if mode == "pre-market":
@@ -152,7 +222,130 @@ class ResearchHarness:
                 "pre-market 실행에는 캘린더 외에 공식 KRX 당일 운영상태 근거가 필요합니다"
             )
         analysis_date = observed_at.astimezone(_KST).date()
+        if self.calendar_bundle.as_of != observed_at:
+            raise ValueError("calendar bundle must match analysis time")
+        if not self.calendar_bundle.is_scheduled_trading_day(analysis_date):
+            raise ValueError("analysis date is a scheduled KRX closure")
         tickers = [candidate.ticker for candidate in candidates]
+        candidate_names = {candidate.ticker: candidate.name for candidate in candidates}
+        candidates_by_ticker = {candidate.ticker: candidate for candidate in candidates}
+        price_by_ticker: dict[str, Signal] = {}
+        if mode == "morning":
+            analysis_time = observed_at.astimezone(_KST).timetz().replace(tzinfo=None)
+            if not time(9, 20) <= analysis_time < time(12, 0):
+                raise ValueError("morning analysis requires 09:20-12:00 KST")
+            if (
+                previous_business_date is None
+                or self.calendar_bundle.previous_business_date(analysis_date)
+                != previous_business_date
+            ):
+                raise ValueError("morning requires exact previous business date")
+            if morning_krx_live_snapshot is None or morning_nxt_evidence is None:
+                raise ValueError("morning requires official KRX live and NXT evidence")
+            live = morning_krx_live_snapshot
+            if (
+                live.business_date != analysis_date
+                or live.fetched_at > observed_at
+                or observed_at - live.source_as_of > timedelta(minutes=10)
+            ):
+                raise ValueError("morning KRX live evidence does not match analysis")
+            cross_by_ticker = {}
+            for candidate in candidates:
+                cross_signals = [
+                    signal
+                    for signal in candidate.signals
+                    if signal.group is SignalGroup.CROSS_MARKET
+                ]
+                price_signals = [
+                    signal
+                    for signal in candidate.signals
+                    if signal.group is SignalGroup.PRICE_VOLUME
+                ]
+                if len(price_signals) != 1:
+                    raise ValueError("morning candidates require one KRX price signal")
+                price_by_ticker[candidate.ticker] = price_signals[0]
+                groups = {signal.group for signal in candidate.signals}
+                if len(cross_signals) > 1 or (
+                    len(groups) >= 2 and len(cross_signals) != 1
+                ):
+                    raise ValueError("morning ranked candidates require one NXT signal")
+                if cross_signals:
+                    cross_by_ticker[candidate.ticker] = cross_signals[0]
+            if set(morning_nxt_evidence) != set(cross_by_ticker):
+                raise ValueError(
+                    "morning NXT evidence must match cross-market candidates"
+                )
+            for ticker, record in morning_nxt_evidence.items():
+                signal = cross_by_ticker[ticker]
+                source_value = record.metrics.get("source_as_of")
+                if not isinstance(source_value, str):
+                    raise ValueError("morning NXT source timestamp is invalid")
+                try:
+                    source_as_of = datetime.fromisoformat(source_value)
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        "morning NXT source timestamp is invalid"
+                    ) from None
+                change_rate = record.metrics.get("change_rate")
+                volume = record.metrics.get("volume")
+                trading_value = record.metrics.get("trading_value")
+                metrics_invalid = (
+                    isinstance(change_rate, bool)
+                    or not isinstance(change_rate, (int, float))
+                    or not math.isfinite(float(change_rate))
+                    or isinstance(volume, bool)
+                    or not isinstance(volume, int)
+                    or volume <= 0
+                    or isinstance(trading_value, bool)
+                    or not isinstance(trading_value, int)
+                    or trading_value <= 0
+                )
+                if metrics_invalid:
+                    raise ValueError("invalid official morning NXT evidence")
+                rate = float(cast(int | float, change_rate))
+                volume = cast(int, volume)
+                trading_value = cast(int, trading_value)
+                expected_reason = (
+                    f"당일 NXT 20분 지연 등락률 {rate:+.2f}%, "
+                    f"거래량 {volume:,}주, 거래대금 {trading_value:,}원"
+                )
+                expected_id = f"nxt:price-snapshot:{analysis_date:%Y%m%d}:{ticker}"
+                if (
+                    record.source is not EvidenceSource.NXT
+                    or record.evidence_id != expected_id
+                    or record.canonical_event_id != expected_id
+                    or record.is_correction
+                    or record.is_withdrawn
+                    or record.verification is not VerificationStatus.OFFICIAL
+                    or record.kind != "price-snapshot"
+                    or record.ticker != ticker
+                    or record.published_date != analysis_date
+                    or record.delay_minutes != 20
+                    or record.company_name != candidate_names[ticker]
+                    or record.source_url
+                    != "https://www.nextrade.co.kr/menu/transactionStatusMain/menuList.do"
+                    or record.fetched_at > observed_at
+                    or observed_at - record.fetched_at > timedelta(hours=2)
+                    or source_as_of.tzinfo is None
+                    or source_as_of.utcoffset() is None
+                    or source_as_of.astimezone(_KST).date() != analysis_date
+                    or source_as_of.astimezone(_KST).time() < time(9, 0)
+                    or source_as_of > record.fetched_at
+                    or observed_at - source_as_of > timedelta(hours=2)
+                    or signal.evidence_id != record.evidence_id
+                    or signal.source_url != record.source_url
+                    or signal.observed_at != record.fetched_at
+                    or signal.score != min(100.0, abs(rate) * 10.0)
+                    or signal.reason != expected_reason
+                ):
+                    raise ValueError("invalid official morning NXT evidence")
+        elif (
+            previous_business_date is not None
+            or morning_krx_live_snapshot is not None
+            or morning_nxt_evidence is not None
+        ):
+            raise ValueError("morning evidence is only valid for morning")
+
         if len(tickers) != len(set(tickers)):
             raise ValueError("중복 종목코드는 허용되지 않습니다")
         if set(operational_evidence) != set(tickers):
@@ -163,14 +356,31 @@ class ResearchHarness:
             if evidence.ticker != ticker:
                 raise ValueError("운영 근거 map의 ticker가 일치하지 않습니다")
             price = evidence.price
-            if price is not None and (
-                price.published_date != analysis_date
-                or price.fetched_at > observed_at
-                or observed_at - price.fetched_at > timedelta(hours=12)
-            ):
-                raise ValueError(
-                    "KRX 가격 근거는 기대 거래일 기준이며 12시간 이내에 수집돼야 합니다"
-                )
+            if mode == "morning" and price is None:
+                raise ValueError("morning requires official KRX price evidence")
+            if price is not None:
+                if mode == "morning":
+                    price_invalid = (
+                        price.published_date != previous_business_date
+                        or price.fetched_at > observed_at
+                    )
+                else:
+                    price_invalid = (
+                        price.published_date != analysis_date
+                        or price.fetched_at > observed_at
+                        or observed_at - price.fetched_at > timedelta(hours=12)
+                    )
+                if price_invalid:
+                    raise ValueError(
+                        "KRX 가격 근거의 기준일 또는 수집시각이 분석 mode와 일치하지 않습니다"
+                    )
+                if mode == "morning":
+                    _validate_morning_krx_signal(
+                        candidates_by_ticker[ticker],
+                        price_by_ticker[ticker],
+                        price,
+                        cast(date, previous_business_date),
+                    )
             risk_record = evidence.listing_risk.evidence
             if risk_record is not None and (
                 risk_record.published_date != analysis_date
@@ -194,6 +404,7 @@ class ResearchHarness:
             apply_operational_decision(candidate, decisions[candidate.ticker])
             for candidate in candidates
         ]
+        valid_until = self.calendar_bundle.add_trading_days(observed_at, 5)
         output_dir.mkdir(parents=True, exist_ok=True)
         if output_dir.is_symlink() or any(
             path.is_symlink() for path in output_dir.rglob("*")
@@ -218,7 +429,7 @@ class ResearchHarness:
                 name=candidate.name,
                 status="관심" if evaluation.final_score >= 60 else "관찰",
                 observed_at=observed_at,
-                valid_until=add_trading_days(observed_at, 5, self.holidays),
+                valid_until=valid_until,
                 score=evaluation.final_score,
                 agent_findings=findings,
                 dissent=[

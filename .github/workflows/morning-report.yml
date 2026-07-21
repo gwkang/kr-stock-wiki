@@ -1,8 +1,8 @@
-name: Daily Post-Market Research
+name: Morning Live-Validated Research
 
 on:
   schedule:
-    - cron: "45 11 * * 1-5"
+    - cron: "25 0 * * 1-5"
   workflow_dispatch:
 
 permissions:
@@ -26,53 +26,83 @@ jobs:
           enable-cache: true
           python-version: "3.13.5"
       - run: uv sync --locked
-      - name: Resolve current KST business date
+      - name: Resolve current KST date
         id: clock
         run: |
           echo "business_date=$(TZ=Asia/Seoul date +%F)" >> "$GITHUB_OUTPUT"
           echo "current_year=$(TZ=Asia/Seoul date +%Y)" >> "$GITHUB_OUTPUT"
+          echo "previous_year=$(TZ=Asia/Seoul date -d '1 year ago' +%Y)" >> "$GITHUB_OUTPUT"
           echo "next_year=$(TZ=Asia/Seoul date -d 'next year' +%Y)" >> "$GITHUB_OUTPUT"
-      - name: Collect official KRX annual calendar
+      - name: Collect official KRX annual calendars
         env:
           BUSINESS_DATE: ${{ steps.clock.outputs.business_date }}
           CURRENT_YEAR: ${{ steps.clock.outputs.current_year }}
+          PREVIOUS_YEAR: ${{ steps.clock.outputs.previous_year }}
           NEXT_YEAR: ${{ steps.clock.outputs.next_year }}
         run: |
           mkdir -p build/evidence
           uv run kr-stock-wiki collect-calendar \
             --year "$CURRENT_YEAR" \
-            --output build/evidence/calendar.json
+            --output "build/evidence/calendar-$CURRENT_YEAR.json"
+          if [ "$PREVIOUS_YEAR" != "$CURRENT_YEAR" ]; then
+            uv run kr-stock-wiki collect-calendar \
+              --year "$PREVIOUS_YEAR" \
+              --output "build/evidence/calendar-$PREVIOUS_YEAR.json"
+          fi
           month_day="${BUSINESS_DATE:5:2}${BUSINESS_DATE:8:2}"
           if ((10#$month_day >= 1220)); then
             uv run kr-stock-wiki collect-calendar \
               --year "$NEXT_YEAR" \
-              --output build/evidence/calendar-next.json
+              --output "build/evidence/calendar-$NEXT_YEAR.json"
           fi
-      - name: Check scheduled-open date
+      - name: Check scheduled-open date and resolve previous business date
         id: scheduled_open
         env:
           BUSINESS_DATE: ${{ steps.clock.outputs.business_date }}
         run: |
+          year=${BUSINESS_DATE%%-*}
+          calendar="build/evidence/calendar-$year.json"
           weekday=$(TZ=Asia/Seoul date -d "$BUSINESS_DATE" +%u)
           if [ "$weekday" -gt 5 ] || \
              jq -e --arg day "$BUSINESS_DATE" \
-               '.holidays | any(.date == $day)' \
-               build/evidence/calendar.json >/dev/null; then
+               '.holidays | any(.date == $day)' "$calendar" >/dev/null; then
             echo "open=false" >> "$GITHUB_OUTPUT"
             echo "scheduled KRX closure: $BUSINESS_DATE"
-          else
-            echo "open=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
-      - name: Collect complete official KRX daily snapshot
+          previous_business_date=$(TZ=Asia/Seoul date -d "$BUSINESS_DATE - 1 day" +%F)
+          while true; do
+            previous_year=${previous_business_date%%-*}
+            previous_calendar="build/evidence/calendar-$previous_year.json"
+            test -f "$previous_calendar"
+            previous_weekday=$(TZ=Asia/Seoul date -d "$previous_business_date" +%u)
+            if [ "$previous_weekday" -le 5 ] && \
+               ! jq -e --arg day "$previous_business_date" \
+                 '.holidays | any(.date == $day)' "$previous_calendar" >/dev/null; then
+              break
+            fi
+            previous_business_date=$(TZ=Asia/Seoul date -d "$previous_business_date - 1 day" +%F)
+          done
+          echo "open=true" >> "$GITHUB_OUTPUT"
+          echo "previous_business_date=$previous_business_date" >> "$GITHUB_OUTPUT"
+      - name: Collect complete previous official KRX daily snapshot
         if: steps.scheduled_open.outputs.open == 'true'
         env:
-          BUSINESS_DATE: ${{ steps.clock.outputs.business_date }}
+          PREVIOUS_BUSINESS_DATE: ${{ steps.scheduled_open.outputs.previous_business_date }}
           KRX_API_KEY: ${{ secrets.KRX_API_KEY }}
         run: |
           uv run kr-stock-wiki collect-krx \
+            --date "$PREVIOUS_BUSINESS_DATE" \
+            --output build/evidence/krx-previous.json
+      - name: Collect positive current official KRX live activity
+        if: steps.scheduled_open.outputs.open == 'true'
+        env:
+          BUSINESS_DATE: ${{ steps.clock.outputs.business_date }}
+        run: |
+          uv run kr-stock-wiki collect-krx-live \
             --date "$BUSINESS_DATE" \
-            --output build/evidence/krx.json
-      - name: Collect complete official NXT delayed snapshot
+            --output build/evidence/krx-live.json
+      - name: Collect complete current official NXT delayed snapshot
         if: steps.scheduled_open.outputs.open == 'true'
         env:
           BUSINESS_DATE: ${{ steps.clock.outputs.business_date }}
@@ -85,18 +115,27 @@ jobs:
         id: discovery_clock
         run: |
           echo "as_of=$(TZ=Asia/Seoul date '+%Y-%m-%dT%H:%M:%S.%6N%:z')" >> "$GITHUB_OUTPUT"
-      - name: Build provisional official candidate input
+      - name: Build provisional official morning candidate input
         if: steps.scheduled_open.outputs.open == 'true'
         env:
           AS_OF: ${{ steps.discovery_clock.outputs.as_of }}
+          PREVIOUS_DATE: ${{ steps.scheduled_open.outputs.previous_business_date }}
         run: |
-          uv run kr-stock-wiki build-daily-input \
+          calendar_args=()
+          for calendar in build/evidence/calendar-*.json; do
+            calendar_args+=(--calendar "$calendar")
+          done
+          test "${#calendar_args[@]}" -gt 0
+          uv run kr-stock-wiki build-morning-input \
             --watchlist config/watchlist.json \
-            --krx-snapshot build/evidence/krx.json \
+            --krx-snapshot build/evidence/krx-previous.json \
             --nxt-snapshot build/evidence/nxt.json \
+            --krx-live-snapshot build/evidence/krx-live.json \
+            "${calendar_args[@]}" \
+            --previous-business-date "$PREVIOUS_DATE" \
             --as-of "$AS_OF" \
             --output build/evidence/candidates.json
-      - name: Collect complete KIND risk status for every candidate
+      - name: Collect complete KIND risk status for every morning candidate
         if: steps.scheduled_open.outputs.open == 'true'
         env:
           BUSINESS_DATE: ${{ steps.clock.outputs.business_date }}
@@ -115,43 +154,56 @@ jobs:
         id: analysis_clock
         run: |
           echo "as_of=$(TZ=Asia/Seoul date '+%Y-%m-%dT%H:%M:%S.%6N%:z')" >> "$GITHUB_OUTPUT"
-      - name: Rebuild official candidate input at final analysis time
+      - name: Rebuild official morning candidate input at final analysis time
         if: steps.scheduled_open.outputs.open == 'true'
         env:
           AS_OF: ${{ steps.analysis_clock.outputs.as_of }}
-        run: |
-          uv run kr-stock-wiki build-daily-input \
-            --watchlist config/watchlist.json \
-            --krx-snapshot build/evidence/krx.json \
-            --nxt-snapshot build/evidence/nxt.json \
-            --as-of "$AS_OF" \
-            --output build/evidence/candidates.json
-      - name: Generate fail-closed post-market Wiki report
-        if: steps.scheduled_open.outputs.open == 'true'
+          PREVIOUS_DATE: ${{ steps.scheduled_open.outputs.previous_business_date }}
         run: |
           calendar_args=()
-          for calendar in build/evidence/calendar*.json; do
+          for calendar in build/evidence/calendar-*.json; do
+            calendar_args+=(--calendar "$calendar")
+          done
+          test "${#calendar_args[@]}" -gt 0
+          uv run kr-stock-wiki build-morning-input \
+            --watchlist config/watchlist.json \
+            --krx-snapshot build/evidence/krx-previous.json \
+            --nxt-snapshot build/evidence/nxt.json \
+            --krx-live-snapshot build/evidence/krx-live.json \
+            "${calendar_args[@]}" \
+            --previous-business-date "$PREVIOUS_DATE" \
+            --as-of "$AS_OF" \
+            --output build/evidence/candidates.json
+      - name: Generate fail-closed morning Wiki report
+        if: steps.scheduled_open.outputs.open == 'true'
+        env:
+          PREVIOUS_DATE: ${{ steps.scheduled_open.outputs.previous_business_date }}
+        run: |
+          calendar_args=()
+          for calendar in build/evidence/calendar-*.json; do
             calendar_args+=(--calendar "$calendar")
           done
           test "${#calendar_args[@]}" -gt 0
           uv run kr-stock-wiki run \
             --input build/evidence/candidates.json \
             --watchlist config/watchlist.json \
-            --krx-snapshot build/evidence/krx.json \
-            "${calendar_args[@]}" \
+            --krx-snapshot build/evidence/krx-previous.json \
             --nxt-snapshot build/evidence/nxt.json \
+            --krx-live-snapshot build/evidence/krx-live.json \
+            "${calendar_args[@]}" \
+            --previous-business-date "$PREVIOUS_DATE" \
             --kind-status build/evidence/kind.json \
             --output wiki
           uv run kr-stock-wiki lint --wiki wiki
-      - name: Preserve official-snapshots audit artifact
+      - name: Preserve official-snapshots morning audit artifact
         if: always() && steps.scheduled_open.outputs.open == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: official-snapshots-${{ steps.clock.outputs.business_date }}
+          name: official-snapshots-morning-${{ steps.clock.outputs.business_date }}
           path: build/evidence/
           if-no-files-found: warn
           retention-days: 30
-      - name: Commit validated Wiki source
+      - name: Commit validated morning Wiki source
         if: steps.scheduled_open.outputs.open == 'true'
         id: source_commit
         env:
@@ -163,7 +215,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -- wiki
           if ! git diff --cached --quiet; then
-            git commit -m "docs: publish $BUSINESS_DATE post-market research"
+            git commit -m "docs: publish $BUSINESS_DATE morning research"
             git push origin HEAD:main
           fi
           echo "source_ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
