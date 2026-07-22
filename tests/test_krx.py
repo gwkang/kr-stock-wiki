@@ -1,6 +1,9 @@
 import json
 import traceback
 from datetime import date, datetime, timedelta
+from email.message import Message
+from io import BytesIO
+from urllib.error import HTTPError
 from zoneinfo import ZoneInfo
 
 from kr_stock_wiki.collectors.krx import (
@@ -227,6 +230,60 @@ def test_krx_transport_error_never_exposes_api_key():
     client = KrxClient(api_key=key, transport=transport)
 
     with pytest.raises(KrxTransportError) as captured:
+        client.daily_prices(date(2026, 7, 17), markets=(KrxMarket.KOSPI,))
+
+    rendered = "".join(
+        traceback.format_exception(
+            type(captured.value), captured.value, captured.value.__traceback__
+        )
+    )
+    assert key not in rendered
+
+
+def test_krx_http_error_reports_safe_status_without_reflected_key_leak():
+    import pytest
+
+    key = "secret-krx-key"
+    reflected_url = f"https://data-dbg.krx.co.kr/?AUTH_KEY={key}&basDd=20260717"
+
+    def transport(url: str, _timeout: float) -> bytes:
+        raise HTTPError(
+            url,
+            401,
+            "Unauthorized",
+            Message(),
+            BytesIO(
+                json.dumps(
+                    {"respCode": "401", "respMsg": f"Unauthorized {reflected_url}"}
+                ).encode()
+            ),
+        )
+
+    client = KrxClient(api_key=key, transport=transport)
+
+    with pytest.raises(KrxTransportError, match="^KRX HTTP 401$") as captured:
+        client.daily_prices(date(2026, 7, 17), markets=(KrxMarket.KOSPI,))
+
+    rendered = "".join(
+        traceback.format_exception(
+            type(captured.value), captured.value, captured.value.__traceback__
+        )
+    )
+    assert key not in rendered
+    assert reflected_url not in rendered
+
+
+def test_krx_http_error_without_json_reports_safe_http_status():
+    import pytest
+
+    key = "secret-krx-key"
+
+    def transport(url: str, _timeout: float) -> bytes:
+        raise HTTPError(url, 503, "Service Unavailable", Message(), BytesIO(b"<html>"))
+
+    client = KrxClient(api_key=key, transport=transport)
+
+    with pytest.raises(KrxTransportError, match="KRX HTTP 503") as captured:
         client.daily_prices(date(2026, 7, 17), markets=(KrxMarket.KOSPI,))
 
     rendered = "".join(

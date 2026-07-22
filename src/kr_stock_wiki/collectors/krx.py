@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import StrEnum
 from typing import Callable
+from urllib.error import HTTPError
 from urllib.parse import urlencode, urlparse
 from urllib.request import urlopen
 
@@ -241,6 +242,8 @@ class KrxClient:
         url = f"{_BASE_URL}/{endpoint}?{urlencode(params)}"
         try:
             raw_payload = self.transport(url, self.timeout)
+        except HTTPError as error:
+            raise KrxTransportError(f"KRX HTTP {error.code}") from None
         except (OSError, TimeoutError):
             raise KrxTransportError("KRX request failed") from None
         try:
