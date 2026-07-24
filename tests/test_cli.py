@@ -604,6 +604,28 @@ def test_collect_dart_cleans_unique_temporary_file_on_replace_failure(
     assert list(tmp_path.iterdir()) == []
 
 
+def test_collect_kis_requires_both_environment_credentials(
+    tmp_path: Path, monkeypatch, capsys
+):
+    monkeypatch.delenv("KIS_APP_KEY", raising=False)
+    monkeypatch.delenv("KIS_APP_SECRET", raising=False)
+
+    code = main(
+        [
+            "collect-kis",
+            "--watchlist",
+            str(tmp_path / "watchlist.json"),
+            "--date",
+            "2026-07-17",
+            "--output",
+            str(tmp_path / "kis.json"),
+        ]
+    )
+
+    assert code == 2
+    assert "KIS_APP_KEY" in capsys.readouterr().err
+
+
 def test_collect_dart_writes_versioned_snapshot(tmp_path: Path, monkeypatch):
     record = EvidenceRecord(
         source=EvidenceSource.DART,

@@ -4,6 +4,7 @@ import math
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import cast
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import yaml
@@ -44,16 +45,29 @@ def _validate_morning_krx_signal(
     previous_business_date: date,
 ) -> None:
     date_text = previous_business_date.strftime("%Y%m%d")
-    expected_ids = {
-        (
-            f"krx:daily:KOSPI:{date_text}:{candidate.ticker}",
-            f"https://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_trd?basDd={date_text}",
-        ),
-        (
-            f"krx:daily:KOSDAQ:{date_text}:{candidate.ticker}",
-            f"https://data-dbg.krx.co.kr/svc/apis/sto/ksq_bydd_trd?basDd={date_text}",
-        ),
-    }
+    if price.source is EvidenceSource.KIS:
+        parsed = urlparse(price.source_url)
+        source_valid = (
+            price.evidence_id == f"kis:daily:{date_text}:{candidate.ticker}"
+            and parsed.scheme == "https"
+            and parsed.hostname == "openapi.koreainvestment.com"
+            and parsed.port == 9443
+            and parsed.path
+            == "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
+        )
+        price_label = "KIS"
+    else:
+        source_valid = (price.evidence_id, price.source_url) in {
+            (
+                f"krx:daily:KOSPI:{date_text}:{candidate.ticker}",
+                f"https://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_trd?basDd={date_text}",
+            ),
+            (
+                f"krx:daily:KOSDAQ:{date_text}:{candidate.ticker}",
+                f"https://data-dbg.krx.co.kr/svc/apis/sto/ksq_bydd_trd?basDd={date_text}",
+            ),
+        }
+        price_label = "KRX"
     change_rate = price.metrics.get("change_rate")
     volume = price.metrics.get("volume")
     trading_value = price.metrics.get("trading_value")
@@ -74,12 +88,12 @@ def _validate_morning_krx_signal(
     volume = cast(int, volume)
     trading_value = cast(int, trading_value)
     expected_reason = (
-        f"전 거래일 KRX 등락률 {rate:+.2f}%, 거래량 {volume:,}주, "
+        f"전 거래일 {price_label} 등락률 {rate:+.2f}%, 거래량 {volume:,}주, "
         f"거래대금 {trading_value:,}원"
     )
     if (
-        (price.evidence_id, price.source_url) not in expected_ids
-        or price.source is not EvidenceSource.KRX
+        not source_valid
+        or price.source not in {EvidenceSource.KRX, EvidenceSource.KIS}
         or price.canonical_event_id != price.evidence_id
         or price.is_correction
         or price.is_withdrawn

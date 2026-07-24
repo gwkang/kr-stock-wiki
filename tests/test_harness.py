@@ -372,6 +372,51 @@ def test_harness_accepts_0730_pre_market_with_exact_previous_official_evidence(
 
     assert len(result.reports) == 1
 
+    kis_id = "kis:daily:20260717:005930"
+    kis_url = (
+        "https://openapi.koreainvestment.com:9443/"
+        "uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
+        "?FID_INPUT_DATE_2=20260717"
+    )
+    kis_price = EvidenceRecord(
+        **{
+            **price.__dict__,
+            "source": EvidenceSource.KIS,
+            "evidence_id": kis_id,
+            "canonical_event_id": kis_id,
+            "source_url": kis_url,
+        }
+    )
+    kis_candidate = Candidate(
+        candidate.ticker,
+        candidate.name,
+        [
+            Signal(
+                SignalGroup.PRICE_VOLUME,
+                25,
+                "전 거래일 KIS 등락률 +2.50%, 거래량 1,000,000주, 거래대금 100,000,000,000원",
+                kis_url,
+                fetched,
+                evidence_id=kis_id,
+            ),
+            candidate.signals[1],
+        ],
+    )
+    kis_result = ResearchHarness(calendar_bundle=calendar_bundle(observed)).run(
+        [kis_candidate],
+        observed,
+        "pre-market",
+        tmp_path / "kis",
+        operational_evidence={
+            "005930": OperationalEvidence(
+                "005930", kis_price, ListingRisk("005930", observed.date(), kind)
+            )
+        },
+        previous_business_date=previous,
+        pre_market_nxt_evidence={"005930": nxt},
+    )
+    assert len(kis_result.reports) == 1
+
     import pytest
 
     too_early = observed.replace(hour=6, minute=59)

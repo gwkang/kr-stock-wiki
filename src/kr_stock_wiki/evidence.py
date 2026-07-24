@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 class EvidenceSource(StrEnum):
     DART = "dart"
+    KIS = "kis"
     KRX = "krx"
     KIND = "kind"
     NXT = "nxt"

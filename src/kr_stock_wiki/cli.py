@@ -19,6 +19,7 @@ from .collectors.calendar import (
 from .collectors.dart import DartClient
 from .collectors.kind import KindClient
 from .collectors.kind_market_notices import KindMarketNoticeClient
+from .collectors.kis import KisClient, KisDailySnapshot
 from .collectors.krx import KrxClient, KrxDailySnapshot
 from .collectors.krx_live import KrxLiveActivitySnapshot, KrxLiveClient
 from .collectors.market_notices import KrxMarketNoticeClient
@@ -181,6 +182,13 @@ def _load_krx_snapshot(path: Path) -> KrxDailySnapshot:
     return KrxDailySnapshot.from_payload(payload)
 
 
+def _load_kis_snapshot(path: Path) -> KisDailySnapshot:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("KIS snapshot must be a JSON object")
+    return KisDailySnapshot.from_payload(payload)
+
+
 def _load_krx_live_snapshot(path: Path) -> KrxLiveActivitySnapshot:
     payload = json.loads(path.read_text(encoding="utf-8"))
     return KrxLiveActivitySnapshot.from_payload(payload)
@@ -191,7 +199,7 @@ def _verify_official_candidate_input(
     *,
     watchlist_path: Path,
     nxt_snapshot_path: Path,
-    krx_snapshot: KrxDailySnapshot,
+    krx_snapshot: KrxDailySnapshot | KisDailySnapshot,
     calendar_bundle: KrxCalendarBundle,
     observed: datetime,
     krx_live_path: Path | None = None,
@@ -323,34 +331,38 @@ def _operational_evidence(
     *,
     observed: datetime,
     business_date: date,
-    krx_snapshot: KrxDailySnapshot,
+    krx_snapshot: KrxDailySnapshot | KisDailySnapshot,
     listing_risks: dict[str, ListingRisk],
     mode: str = "post-market",
     previous_business_date: date | None = None,
 ) -> dict[str, OperationalEvidence]:
+    price_snapshot = krx_snapshot
     if mode in {"pre-market", "morning"}:
         if (
             previous_business_date is None
-            or krx_snapshot.business_date != previous_business_date
+            or price_snapshot.business_date != previous_business_date
             or previous_business_date >= business_date
         ):
-            raise ValueError("morning KRX snapshot must match exact previous date")
+            raise ValueError("previous price snapshot must match exact previous date")
         maximum_age = None
     else:
-        if krx_snapshot.business_date != business_date:
-            raise ValueError("KRX snapshot date must match candidate business_date")
+        if price_snapshot.business_date != business_date:
+            raise ValueError("price snapshot date must match candidate business_date")
         maximum_age = timedelta(hours=12)
-    if krx_snapshot.fetched_at > observed or (
-        maximum_age is not None and observed - krx_snapshot.fetched_at > maximum_age
+    if price_snapshot.fetched_at > observed or (
+        maximum_age is not None and observed - price_snapshot.fetched_at > maximum_age
     ):
-        if mode == "morning":
-            raise ValueError("morning KRX snapshot timestamp is invalid")
-        raise ValueError("KRX snapshot must be fetched within 12 hours before analysis")
-    market_day = TradingDayGate().assess(krx_snapshot.business_date, krx_snapshot)
-    if market_day.status is not MarketDayStatus.OPEN:
-        raise ValueError(f"KRX 거래일 확인 실패: {market_day.reason}")
+        if isinstance(price_snapshot, KrxDailySnapshot):
+            raise ValueError("KRX snapshot must be fetched within 12 hours before analysis")
+        raise ValueError("price snapshot timestamp is invalid")
+    if isinstance(price_snapshot, KrxDailySnapshot):
+        market_day = TradingDayGate().assess(
+            price_snapshot.business_date, price_snapshot
+        )
+        if market_day.status is not MarketDayStatus.OPEN:
+            raise ValueError(f"KRX 거래일 확인 실패: {market_day.reason}")
     prices: dict[str, EvidenceRecord] = {}
-    for record in krx_snapshot.records:
+    for record in price_snapshot.records:
         if record.ticker is None:
             continue
         if record.ticker in prices:
@@ -406,7 +418,8 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run", help="JSON 신호 입력으로 Wiki 리포트를 생성합니다")
     run.add_argument("--input", required=True, type=Path)
-    run.add_argument("--krx-snapshot", required=True, type=Path)
+    run.add_argument("--kis-snapshot", type=Path)
+    run.add_argument("--krx-snapshot", type=Path)
     run.add_argument("--calendar", required=True, action="append", type=Path)
     run.add_argument("--watchlist", type=Path)
     run.add_argument("--nxt-snapshot", type=Path)
@@ -419,7 +432,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="공식 KRX·NXT snapshot에서 post-market 후보 입력을 생성합니다",
     )
     daily.add_argument("--watchlist", required=True, type=Path)
-    daily.add_argument("--krx-snapshot", required=True, type=Path)
+    daily.add_argument("--kis-snapshot", type=Path)
+    daily.add_argument("--krx-snapshot", type=Path)
     daily.add_argument("--nxt-snapshot", required=True, type=Path)
     daily.add_argument("--as-of", required=True, type=datetime.fromisoformat)
     daily.add_argument("--output", required=True, type=Path)
@@ -428,7 +442,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="공식 직전 거래일 KRX·NXT 근거에서 07:30 장전 후보 입력을 생성합니다",
     )
     pre_market.add_argument("--watchlist", required=True, type=Path)
-    pre_market.add_argument("--krx-snapshot", required=True, type=Path)
+    pre_market.add_argument("--kis-snapshot", type=Path)
+    pre_market.add_argument("--krx-snapshot", type=Path)
     pre_market.add_argument("--nxt-snapshot", required=True, type=Path)
     pre_market.add_argument("--calendar", required=True, action="append", type=Path)
     pre_market.add_argument(
@@ -464,6 +479,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     krx.add_argument("--date", required=True, type=date.fromisoformat)
     krx.add_argument("--output", required=True, type=Path)
+    kis = commands.add_parser(
+        "collect-kis", help="KIS 국내주식 일별 시세를 watchlist 스냅샷으로 수집합니다"
+    )
+    kis.add_argument("--watchlist", required=True, type=Path)
+    kis.add_argument("--date", required=True, type=date.fromisoformat)
+    kis.add_argument("--output", required=True, type=Path)
     krx_live = commands.add_parser(
         "collect-krx-live",
         help="KRX 공식 메인 화면에서 당일 KOSPI·KOSDAQ 실거래 activity를 수집합니다",
@@ -513,12 +534,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "build-pre-market-input":
         try:
             watchlist = json.loads(args.watchlist.read_text(encoding="utf-8"))
-            krx_snapshot = _load_krx_snapshot(args.krx_snapshot)
+            if (args.kis_snapshot is None) == (args.krx_snapshot is None):
+                raise ValueError("exactly one KIS or KRX snapshot is required")
+            price_snapshot = (
+                _load_kis_snapshot(args.kis_snapshot)
+                if args.kis_snapshot is not None
+                else _load_krx_snapshot(args.krx_snapshot)
+            )
             nxt_snapshot = json.loads(args.nxt_snapshot.read_text(encoding="utf-8"))
             calendar_bundle = _load_calendar_bundle(args.calendar, args.as_of)
             payload = build_pre_market_input(
                 watchlist,
-                krx_snapshot,
+                price_snapshot,
                 nxt_snapshot,
                 calendar_bundle,
                 args.previous_business_date,
@@ -567,10 +594,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "build-daily-input":
         try:
             watchlist = json.loads(args.watchlist.read_text(encoding="utf-8"))
-            krx_snapshot = _load_krx_snapshot(args.krx_snapshot)
+            if (args.kis_snapshot is None) == (args.krx_snapshot is None):
+                raise ValueError("exactly one KIS or KRX snapshot is required")
+            price_snapshot = (
+                _load_kis_snapshot(args.kis_snapshot)
+                if args.kis_snapshot is not None
+                else _load_krx_snapshot(args.krx_snapshot)
+            )
             nxt_snapshot = json.loads(args.nxt_snapshot.read_text(encoding="utf-8"))
             payload = build_post_market_input(
-                watchlist, krx_snapshot, nxt_snapshot, args.as_of
+                watchlist, price_snapshot, nxt_snapshot, args.as_of
             )
             _write_json_atomic(args.output, payload)
         except (
@@ -589,7 +622,13 @@ def main(argv: list[str] | None = None) -> int:
             observed, business_date, mode, source, candidates = _load_candidates(
                 args.input
             )
-            krx_snapshot = _load_krx_snapshot(args.krx_snapshot)
+            if (args.kis_snapshot is None) == (args.krx_snapshot is None):
+                raise ValueError("exactly one KIS or KRX snapshot is required")
+            price_snapshot = (
+                _load_kis_snapshot(args.kis_snapshot)
+                if args.kis_snapshot is not None
+                else _load_krx_snapshot(args.krx_snapshot)
+            )
             calendar_bundle = _load_calendar_bundle(args.calendar, observed)
             has_watchlist = args.watchlist is not None
             has_nxt_snapshot = args.nxt_snapshot is not None
@@ -621,7 +660,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.input,
                     watchlist_path=args.watchlist,
                     nxt_snapshot_path=args.nxt_snapshot,
-                    krx_snapshot=krx_snapshot,
+                    krx_snapshot=price_snapshot,
                     calendar_bundle=calendar_bundle,
                     observed=observed,
                     krx_live_path=args.krx_live_snapshot,
@@ -648,7 +687,7 @@ def main(argv: list[str] | None = None) -> int:
                 candidates,
                 observed=observed,
                 business_date=business_date,
-                krx_snapshot=krx_snapshot,
+                krx_snapshot=price_snapshot,
                 listing_risks=listing_risks,
                 mode=mode,
                 previous_business_date=args.previous_business_date,
@@ -815,6 +854,43 @@ def main(argv: list[str] | None = None) -> int:
             print(f"NXT 수집 오류: {error}", file=sys.stderr)
             return 2
         print(f"collected={len(records)} output={args.output}")
+        return 0
+    if args.command == "collect-kis":
+        app_key = os.environ.get("KIS_APP_KEY")
+        app_secret = os.environ.get("KIS_APP_SECRET")
+        if not app_key or not app_secret:
+            print(
+                "환경변수 KIS_APP_KEY와 KIS_APP_SECRET이 필요합니다",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            watchlist = json.loads(args.watchlist.read_text(encoding="utf-8"))
+            if not isinstance(watchlist, dict) or not isinstance(
+                watchlist.get("stocks"), list
+            ):
+                raise ValueError("invalid user watchlist envelope")
+            stocks = {
+                str(item["ticker"]): str(item["name"])
+                for item in watchlist["stocks"]
+                if isinstance(item, dict) and set(item) == {"ticker", "name"}
+            }
+            if len(stocks) != len(watchlist["stocks"]):
+                raise ValueError("invalid user watchlist stocks")
+            snapshot = KisClient(app_key=app_key, app_secret=app_secret).daily_snapshot(
+                args.date, stocks
+            )
+            _write_json_atomic(args.output, snapshot.to_payload())
+        except (
+            OSError,
+            ValueError,
+            KeyError,
+            TypeError,
+            json.JSONDecodeError,
+        ) as error:
+            print(f"KIS 수집 오류: {error}", file=sys.stderr)
+            return 2
+        print(f"collected={len(snapshot.records)} output={args.output}")
         return 0
     if args.command == "collect-krx":
         api_key = os.environ.get("KRX_API_KEY")

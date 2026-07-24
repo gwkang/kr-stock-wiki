@@ -296,17 +296,29 @@ class OperationalFilter:
             "KOSPI": "/svc/apis/sto/stk_bydd_trd",
             "KOSDAQ": "/svc/apis/sto/ksq_bydd_trd",
         }
+        krx_valid = (
+            record.source is EvidenceSource.KRX
+            and parsed.hostname == "data-dbg.krx.co.kr"
+            and market in expected_paths
+            and parsed.path == expected_paths[market]
+        )
+        kis_valid = (
+            record.source is EvidenceSource.KIS
+            and parsed.hostname == "openapi.koreainvestment.com"
+            and parsed.port == 9443
+            and parsed.path
+            == "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
+        )
         if (
-            record.source is not EvidenceSource.KRX
-            or record.kind != "daily-price"
+            record.kind != "daily-price"
             or record.verification is not VerificationStatus.OFFICIAL
             or record.ticker is None
             or parsed.scheme != "https"
-            or parsed.hostname != "data-dbg.krx.co.kr"
-            or market not in expected_paths
-            or parsed.path != expected_paths[market]
+            or not (krx_valid or kis_valid)
         ):
-            raise ValueError("operational filter requires official KRX daily-price")
+            raise ValueError(
+                "operational filter requires official KRX daily-price or KIS daily-price"
+            )
 
         if listing_risk.ticker != record.ticker:
             raise ValueError("listing risk and KRX price ticker must match")

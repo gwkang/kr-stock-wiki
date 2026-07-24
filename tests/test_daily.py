@@ -12,6 +12,7 @@ from kr_stock_wiki.collectors.calendar import (
     KrxMarketCalendar,
     MarketHoliday,
 )
+from kr_stock_wiki.collectors.kis import KisDailySnapshot
 from kr_stock_wiki.collectors.krx import KrxDailySnapshot, KrxMarket
 from kr_stock_wiki.collectors.krx_live import (
     KrxLiveActivitySnapshot,
@@ -118,6 +119,51 @@ def krx_snapshot(*records: EvidenceRecord) -> KrxDailySnapshot:
     )
 
 
+def kis_price_record(
+    ticker: str = "005930",
+    *,
+    name: str = "삼성전자",
+    published_date: date = BUSINESS_DATE,
+    fetched_at: datetime = AS_OF - timedelta(minutes=20),
+) -> EvidenceRecord:
+    date_text = published_date.strftime("%Y%m%d")
+    return EvidenceRecord(
+        source=EvidenceSource.KIS,
+        evidence_id=f"kis:daily:{date_text}:{ticker}",
+        canonical_event_id=f"kis:daily:{date_text}:{ticker}",
+        kind="daily-price",
+        company_name=name,
+        title=f"{name} KIS 국내주식 일별 시세",
+        source_url=(
+            "https://openapi.koreainvestment.com:9443/"
+            "uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
+            f"?FID_INPUT_DATE_2={date_text}&FID_INPUT_ISCD={ticker}"
+        ),
+        published_date=published_date,
+        fetched_at=fetched_at,
+        verification=VerificationStatus.OFFICIAL,
+        ticker=ticker,
+        metrics={
+            "close": 71_000,
+            "change_rate": 2.5,
+            "volume": 1_000_000,
+            "trading_value": 71_000_000_000,
+            "market_cap": 400_000_000_000_000,
+        },
+        raw={"market": "J", "metadata_date": date_text, "price_date": date_text},
+    )
+
+
+def kis_snapshot(*records: EvidenceRecord) -> KisDailySnapshot:
+    return KisDailySnapshot(
+        business_date=BUSINESS_DATE,
+        requested_tickers=tuple(record.ticker for record in records if record.ticker),
+        completed_tickers=tuple(record.ticker for record in records if record.ticker),
+        records=tuple(records),
+        fetched_at=max(record.fetched_at for record in records),
+    )
+
+
 def session_summary(
     *, fetched_at: datetime = AS_OF - timedelta(minutes=19)
 ) -> EvidenceRecord:
@@ -200,6 +246,31 @@ def test_build_pre_market_input_uses_exact_previous_krx_and_nxt_at_0730():
     ]
     assert candidate["signals"][0]["reason"].startswith("전 거래일 KRX")
     assert candidate["signals"][1]["reason"].startswith("전 거래일 NXT")
+
+
+def test_build_pre_market_input_uses_exact_previous_kis_and_nxt_at_0730():
+    analysis_at = datetime(2026, 7, 21, 7, 30, tzinfo=KST)
+    kis = kis_price_record()
+    nxt = replace(
+        price_record(source=EvidenceSource.NXT),
+        fetched_at=analysis_at - timedelta(minutes=1),
+    )
+
+    payload = daily.build_pre_market_input(
+        watchlist(("005930", "삼성전자")),
+        kis_snapshot(kis),
+        nxt_payload(nxt),
+        calendar_bundle(analysis_at),
+        BUSINESS_DATE,
+        analysis_at,
+    )
+
+    candidate = payload["candidates"][0]
+    assert [signal["evidence_id"] for signal in candidate["signals"]] == [
+        kis.evidence_id,
+        nxt.evidence_id,
+    ]
+    assert candidate["signals"][0]["reason"].startswith("전 거래일 KIS")
 
 
 def test_build_pre_market_input_rejects_watchlist_ticker_missing_from_nxt():

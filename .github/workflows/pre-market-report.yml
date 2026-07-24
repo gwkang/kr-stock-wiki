@@ -85,15 +85,17 @@ jobs:
           done
           echo "open=true" >> "$GITHUB_OUTPUT"
           echo "previous_business_date=$previous_business_date" >> "$GITHUB_OUTPUT"
-      - name: Collect complete previous official KRX daily snapshot
+      - name: Collect complete previous KIS watchlist daily snapshot
         if: steps.scheduled_open.outputs.open == 'true'
         env:
           PREVIOUS_BUSINESS_DATE: ${{ steps.scheduled_open.outputs.previous_business_date }}
-          KRX_API_KEY: ${{ secrets.KRX_API_KEY }}
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
         run: |
-          uv run kr-stock-wiki collect-krx \
+          uv run kr-stock-wiki collect-kis \
+            --watchlist config/watchlist.json \
             --date "$PREVIOUS_BUSINESS_DATE" \
-            --output build/evidence/krx-previous.json
+            --output build/evidence/kis-previous.json
       - name: Collect complete previous official NXT session snapshot
         if: steps.scheduled_open.outputs.open == 'true'
         env:
@@ -120,7 +122,7 @@ jobs:
           test "${#calendar_args[@]}" -gt 0
           uv run kr-stock-wiki build-pre-market-input \
             --watchlist config/watchlist.json \
-            --krx-snapshot build/evidence/krx-previous.json \
+            --kis-snapshot build/evidence/kis-previous.json \
             --nxt-snapshot build/evidence/nxt-previous.json \
             "${calendar_args[@]}" \
             --previous-business-date "$PREVIOUS_DATE" \
@@ -158,7 +160,7 @@ jobs:
           test "${#calendar_args[@]}" -gt 0
           uv run kr-stock-wiki build-pre-market-input \
             --watchlist config/watchlist.json \
-            --krx-snapshot build/evidence/krx-previous.json \
+            --kis-snapshot build/evidence/kis-previous.json \
             --nxt-snapshot build/evidence/nxt-previous.json \
             "${calendar_args[@]}" \
             --previous-business-date "$PREVIOUS_DATE" \
@@ -177,7 +179,7 @@ jobs:
           uv run kr-stock-wiki run \
             --input build/evidence/candidates.json \
             --watchlist config/watchlist.json \
-            --krx-snapshot build/evidence/krx-previous.json \
+            --kis-snapshot build/evidence/kis-previous.json \
             --nxt-snapshot build/evidence/nxt-previous.json \
             "${calendar_args[@]}" \
             --previous-business-date "$PREVIOUS_DATE" \

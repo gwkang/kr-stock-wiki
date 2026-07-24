@@ -63,13 +63,15 @@ def test_pre_market_workflow_runs_at_0730_kst_from_previous_official_session():
     assert "if ((10#$month_day >= 1220))" in text
     assert "previous_business_date" in text
     assert "collect-krx-live" not in text
-    assert "collect-krx" in text
+    assert "collect-kis" in text
+    assert "KIS_APP_KEY" in text
+    assert "KIS_APP_SECRET" in text
     assert "collect-nxt" in text
     assert text.count("build-pre-market-input") == 2
     assert text.count("%6N") == 2
     assert "collect-kind" in text
     assert text.count('--previous-business-date "$PREVIOUS_DATE"') == 3
-    assert "--krx-snapshot build/evidence/krx-previous.json" in text
+    assert "--kis-snapshot build/evidence/kis-previous.json" in text
     assert "--nxt-snapshot build/evidence/nxt-previous.json" in text
     assert "kr-stock-wiki run" in text
     assert "kr-stock-wiki lint --wiki wiki" in text

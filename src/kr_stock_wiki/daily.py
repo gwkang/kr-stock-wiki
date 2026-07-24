@@ -7,6 +7,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from .collectors.calendar import KrxCalendarBundle
+from .collectors.kis import KisDailySnapshot
 from .collectors.krx import KrxDailySnapshot, KrxMarket
 from .collectors.krx_live import KrxLiveActivitySnapshot
 from .evidence import EvidenceRecord, EvidenceSource, VerificationStatus
@@ -263,64 +264,80 @@ def _integer_metric(record: EvidenceRecord, name: str) -> int:
 
 def build_post_market_input(
     watchlist_payload: object,
-    krx_snapshot: KrxDailySnapshot,
+    price_snapshot: KrxDailySnapshot | KisDailySnapshot,
     nxt_snapshot_payload: object,
     as_of: datetime,
 ) -> dict[str, Any]:
-    """Build deterministic candidate input from official KRX and NXT snapshots."""
+    """Build deterministic candidate input from official KIS/legacy KRX and NXT snapshots."""
     if as_of.tzinfo is None or as_of.utcoffset() is None:
         raise ValueError("as_of must include a timezone")
     as_of_kst = as_of.astimezone(_KST)
     if as_of_kst.timetz().replace(tzinfo=None) < time(20, 20):
         raise ValueError("post-market analysis requires 20:20 KST or later")
-    business_date = krx_snapshot.business_date
+    business_date = price_snapshot.business_date
     if as_of_kst.date() != business_date:
-        raise ValueError("post-market as_of must match the KRX business date")
-    if not krx_snapshot.coverage_complete:
-        raise ValueError("KRX snapshot coverage must be complete")
+        raise ValueError(
+            "post-market as_of must match the price snapshot business date"
+        )
+    if not price_snapshot.coverage_complete:
+        raise ValueError("price snapshot coverage must be complete")
     if (
-        krx_snapshot.fetched_at > as_of
-        or as_of - krx_snapshot.fetched_at > _MAX_KRX_AGE
+        price_snapshot.fetched_at > as_of
+        or as_of - price_snapshot.fetched_at > _MAX_KRX_AGE
     ):
-        raise ValueError("KRX snapshot must be fresh and not future evidence")
+        raise ValueError("price snapshot must be fresh and not future evidence")
+    if isinstance(price_snapshot, KisDailySnapshot):
+        price_source = EvidenceSource.KIS
+        price_label = "KIS"
+    elif isinstance(price_snapshot, KrxDailySnapshot):
+        price_source = EvidenceSource.KRX
+        price_label = "KRX"
+    else:
+        raise ValueError("unsupported daily price snapshot")
 
     stocks = _watchlist(watchlist_payload)
-    krx_records = {record.ticker: record for record in krx_snapshot.records}
+    price_records = {record.ticker: record for record in price_snapshot.records}
     quotes = _nxt_quotes(nxt_snapshot_payload, business_date=business_date, as_of=as_of)
     candidates: list[dict[str, Any]] = []
     for ticker, configured_name in stocks:
-        krx = krx_records.get(ticker)
-        if krx is None:
-            raise ValueError(f"watchlist ticker {ticker} is missing from KRX snapshot")
-        if krx.company_name != configured_name:
+        price = price_records.get(ticker)
+        if price is None:
+            raise ValueError(
+                f"watchlist ticker {ticker} is missing from {price_label} snapshot"
+            )
+        if price.company_name != configured_name:
             raise ValueError(f"watchlist name mismatch for {ticker}")
         if (
-            krx.source is not EvidenceSource.KRX
-            or krx.verification is not VerificationStatus.OFFICIAL
-            or krx.kind != "daily-price"
-            or krx.published_date != business_date
+            price.source is not price_source
+            or price.verification is not VerificationStatus.OFFICIAL
+            or price.kind != "daily-price"
+            or price.published_date != business_date
         ):
-            raise ValueError("invalid official KRX daily-price evidence")
-        change_rate = _finite_number(krx.metrics.get("change_rate"), "KRX change_rate")
-        volume = _integer_metric(krx, "volume")
-        trading_value = _integer_metric(krx, "trading_value")
+            raise ValueError(f"invalid official {price_label} daily-price evidence")
+        change_rate = _finite_number(
+            price.metrics.get("change_rate"), f"{price_label} change_rate"
+        )
+        volume = _integer_metric(price, "volume")
+        trading_value = _integer_metric(price, "trading_value")
         signals: list[dict[str, Any]] = [
             {
                 "group": "price-volume",
-                "score": _score(change_rate, "KRX change_rate"),
+                "score": _score(change_rate, f"{price_label} change_rate"),
                 "reason": (
-                    f"KRX 등락률 {change_rate:+.2f}%, 거래량 {volume:,}주, "
+                    f"{price_label} 등락률 {change_rate:+.2f}%, 거래량 {volume:,}주, "
                     f"거래대금 {trading_value:,}원"
                 ),
-                "source_url": krx.source_url,
-                "observed_at": krx.fetched_at.isoformat(),
-                "evidence_id": krx.evidence_id,
+                "source_url": price.source_url,
+                "observed_at": price.fetched_at.isoformat(),
+                "evidence_id": price.evidence_id,
             }
         ]
         nxt = quotes.get(ticker)
         if nxt is not None:
-            if nxt.company_name != krx.company_name:
-                raise ValueError(f"KRX/NXT company name mismatch for {ticker}")
+            if nxt.company_name != price.company_name:
+                raise ValueError(
+                    f"{price_label}/NXT company name mismatch for {ticker}"
+                )
             nxt_change_rate = _finite_number(
                 nxt.metrics.get("change_rate"), "NXT change_rate"
             )
@@ -342,7 +359,7 @@ def build_post_market_input(
         candidates.append(
             {
                 "ticker": ticker,
-                "name": krx.company_name,
+                "name": price.company_name,
                 "risk_penalty": 0,
                 "signals": signals,
             }
@@ -359,7 +376,7 @@ def build_post_market_input(
 
 def build_pre_market_input(
     watchlist_payload: object,
-    previous_krx_snapshot: KrxDailySnapshot,
+    previous_price_snapshot: KrxDailySnapshot | KisDailySnapshot,
     previous_nxt_snapshot_payload: object,
     calendar_bundle: KrxCalendarBundle,
     previous_business_date: date,
@@ -380,15 +397,25 @@ def build_pre_market_input(
     if calendar_bundle.previous_business_date(business_date) != previous_business_date:
         raise ValueError("pre-market previous date does not match official calendar")
     if (
-        not previous_krx_snapshot.coverage_complete
-        or previous_krx_snapshot.business_date != previous_business_date
+        not previous_price_snapshot.coverage_complete
+        or previous_price_snapshot.business_date != previous_business_date
         or previous_business_date >= business_date
-        or previous_krx_snapshot.fetched_at > as_of
+        or previous_price_snapshot.fetched_at > as_of
     ):
-        raise ValueError("invalid exact previous KRX daily snapshot")
+        raise ValueError("invalid exact previous daily price snapshot")
+    if isinstance(previous_price_snapshot, KisDailySnapshot):
+        price_source = EvidenceSource.KIS
+        price_label = "KIS"
+    elif isinstance(previous_price_snapshot, KrxDailySnapshot):
+        price_source = EvidenceSource.KRX
+        price_label = "KRX"
+    else:
+        raise ValueError("unsupported previous daily price snapshot")
 
     stocks = _watchlist(watchlist_payload)
-    krx_records = {record.ticker: record for record in previous_krx_snapshot.records}
+    price_records = {
+        record.ticker: record for record in previous_price_snapshot.records
+    }
     quotes = _nxt_quotes(
         previous_nxt_snapshot_payload,
         business_date=previous_business_date,
@@ -400,39 +427,43 @@ def build_pre_market_input(
     )
     candidates: list[dict[str, Any]] = []
     for ticker, configured_name in stocks:
-        krx = krx_records.get(ticker)
-        if krx is None:
-            raise ValueError(f"watchlist ticker {ticker} is missing from KRX snapshot")
-        if krx.company_name != configured_name:
+        price = price_records.get(ticker)
+        if price is None:
+            raise ValueError(
+                f"watchlist ticker {ticker} is missing from {price_label} snapshot"
+            )
+        if price.company_name != configured_name:
             raise ValueError(f"watchlist name mismatch for {ticker}")
         if (
-            krx.source is not EvidenceSource.KRX
-            or krx.verification is not VerificationStatus.OFFICIAL
-            or krx.kind != "daily-price"
-            or krx.published_date != previous_business_date
+            price.source is not price_source
+            or price.verification is not VerificationStatus.OFFICIAL
+            or price.kind != "daily-price"
+            or price.published_date != previous_business_date
         ):
-            raise ValueError("invalid official previous KRX daily-price evidence")
-        change_rate = _finite_number(krx.metrics.get("change_rate"), "KRX change_rate")
-        volume = _integer_metric(krx, "volume")
-        trading_value = _integer_metric(krx, "trading_value")
+            raise ValueError("invalid official previous daily-price evidence")
+        change_rate = _finite_number(
+            price.metrics.get("change_rate"), f"{price_label} change_rate"
+        )
+        volume = _integer_metric(price, "volume")
+        trading_value = _integer_metric(price, "trading_value")
         signals: list[dict[str, Any]] = [
             {
                 "group": "price-volume",
-                "score": _score(change_rate, "KRX change_rate"),
+                "score": _score(change_rate, f"{price_label} change_rate"),
                 "reason": (
-                    f"전 거래일 KRX 등락률 {change_rate:+.2f}%, 거래량 {volume:,}주, "
+                    f"전 거래일 {price_label} 등락률 {change_rate:+.2f}%, 거래량 {volume:,}주, "
                     f"거래대금 {trading_value:,}원"
                 ),
-                "source_url": krx.source_url,
-                "observed_at": krx.fetched_at.isoformat(),
-                "evidence_id": krx.evidence_id,
+                "source_url": price.source_url,
+                "observed_at": price.fetched_at.isoformat(),
+                "evidence_id": price.evidence_id,
             }
         ]
         nxt = quotes.get(ticker)
         if nxt is None:
             raise ValueError(f"watchlist ticker {ticker} is missing from NXT snapshot")
-        if nxt.company_name != krx.company_name:
-            raise ValueError(f"KRX/NXT company name mismatch for {ticker}")
+        if nxt.company_name != price.company_name:
+            raise ValueError(f"{price_label}/NXT company name mismatch for {ticker}")
         nxt_change_rate = _finite_number(
             nxt.metrics.get("change_rate"), "NXT change_rate"
         )
@@ -454,7 +485,7 @@ def build_pre_market_input(
         candidates.append(
             {
                 "ticker": ticker,
-                "name": krx.company_name,
+                "name": price.company_name,
                 "risk_penalty": 0,
                 "signals": signals,
             }
